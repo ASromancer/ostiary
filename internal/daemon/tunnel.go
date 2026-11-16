@@ -152,6 +152,7 @@ func (s *Service) TunnelOpen(a *TunnelArgs, r *TunnelReply) error {
 		id := newID()
 		d.q.Add(approval.Request{ID: id, Time: time.Now(), Host: a.Host, User: h.User, Cwd: a.Cwd,
 			Repo: repoDir, Agent: a.Agent, Kind: "tunnel", Cmd: display, Level: r.Level})
+		d.cancelIfDraining()
 		r.Pending, r.ID = id, id
 		return nil
 	}
@@ -185,6 +186,8 @@ func (s *Service) TunnelOpen(a *TunnelArgs, r *TunnelReply) error {
 	e.Decision = "approved"
 	r.ID = id
 	if d.isDraining() {
+		e.Decision, e.Note = "cancelled", "restart"
+		d.log.Write(e)
 		r.Code, r.Msg = CodeRestarting, restartingMsg
 		return nil
 	}
@@ -209,6 +212,8 @@ func (s *Service) TunnelOpen(a *TunnelArgs, r *TunnelReply) error {
 			if !d.addTunnel(te) { // a drain began meanwhile
 				te.reason.Store("restart")
 				te.t.Close()
+				e.Decision, e.Note = "cancelled", "restart"
+				d.log.Write(e)
 				r.Code, r.Msg = CodeRestarting, restartingMsg
 				return nil
 			}

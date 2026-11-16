@@ -209,6 +209,7 @@ func (s *Service) Exec(a *ExecArgs, r *ExecReply) error {
 			id = newID()
 			d.q.Add(approval.Request{ID: id, Time: time.Now(), Host: a.Host, User: h.User, Cwd: a.Cwd,
 				Repo: repoDir, Agent: a.Agent, Kind: a.Kind, Cmd: display, Level: r.Level, Reasons: res.Reasons})
+			d.cancelIfDraining()
 			r.Pending, r.ID = id, id
 			return nil
 		}
@@ -229,6 +230,10 @@ func (s *Service) Exec(a *ExecArgs, r *ExecReply) error {
 		return nil
 	}
 	if !d.beginCmd() {
+		if e.Decision == "approved" {
+			e.Decision, e.Note = "cancelled", "restart"
+			d.log.Write(e)
+		}
 		r.Code, r.Msg = CodeRestarting, restartingMsg
 		return nil
 	}

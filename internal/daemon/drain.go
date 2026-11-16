@@ -34,6 +34,13 @@ func (d *Daemon) endCmd() {
 	d.inflight.Done()
 }
 
+// cancelIfDraining finishes pending requests when a drain began while one was being added.
+func (d *Daemon) cancelIfDraining() {
+	if d.isDraining() {
+		d.q.CancelAll("restart")
+	}
+}
+
 func (d *Daemon) isDraining() bool {
 	d.drainMu.Lock()
 	defer d.drainMu.Unlock()
@@ -56,6 +63,7 @@ func (d *Daemon) Drain(ctx context.Context, force bool) {
 	d.draining = true
 	d.drainMu.Unlock()
 	defer close(d.drained)
+	d.q.CancelAll("restart") // nothing can be approved during the wait only to be refused
 
 	if !force {
 		done := make(chan struct{})

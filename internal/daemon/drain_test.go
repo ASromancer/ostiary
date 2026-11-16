@@ -2,7 +2,10 @@ package daemon
 
 import (
 	"context"
+	"github.com/ASromancer/ostiary/internal/approval"
+	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -75,4 +78,29 @@ func TestDrainForceAndTwice(t *testing.T) {
 		t.Fatalf("force waited %s", time.Since(start))
 	}
 	h.d.Drain(context.Background(), false) // second call returns, no panic
+}
+
+func TestDrainOnSignal(t *testing.T) {
+	h := unlocked(t)
+	sig := make(chan os.Signal, 2)
+	go h.d.drainOnSignal(sig)
+	sig <- syscall.SIGTERM
+	for i := 0; i < 100 && Running(); i++ {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if Running() || !h.d.isDraining() {
+		t.Fatal("SIGTERM did not drain and close the listener")
+	}
+}
+
+func TestDrainCancelsRequestAddedWhileDraining(t *testing.T) {
+	h := unlocked(t)
+	h.d.drainMu.Lock()
+	h.d.draining = true // a drain began; its CancelAll already ran
+	h.d.drainMu.Unlock()
+	h.d.q.Add(approval.Request{ID: 999, Host: "web1", Cmd: "x", Kind: "run"})
+	h.d.cancelIfDraining()
+	if _, dec, done, ok := h.d.q.WaitFor(999, time.Second); !ok || !done || dec.Outcome != "restart" {
+		t.Fatalf("%+v %v %v", dec, done, ok)
+	}
 }

@@ -349,6 +349,13 @@ func (d *Daemon) Listen() (net.Listener, error) {
 	return ln, nil
 }
 
+// drainOnSignal drains on the first signal and forces on a second.
+func (d *Daemon) drainOnSignal(sig <-chan os.Signal) {
+	<-sig
+	go func() { <-sig; d.Drain(context.Background(), true) }()
+	d.Drain(context.Background(), false)
+}
+
 // Serve answers RPCs on ln (from Listen) until SIGINT/SIGTERM.
 func (d *Daemon) Serve(ln net.Listener) error {
 	sock := paths.Socket()
@@ -357,11 +364,7 @@ func (d *Daemon) Serve(ln net.Listener) error {
 	d.mu.Lock()
 	d.ln = ln
 	d.mu.Unlock()
-	go func() {
-		<-sig
-		go func() { <-sig; d.Drain(context.Background(), true) }() // a second signal means now
-		d.Drain(context.Background(), false)
-	}()
+	go d.drainOnSignal(sig)
 	go func() {
 		for {
 			cleanOut()
