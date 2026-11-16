@@ -228,13 +228,17 @@ func (d *Daemon) loadConfig() error {
 	d.mu.Lock()
 	d.cfg, d.engine = cfg, eng
 	d.mu.Unlock()
+	d.pruneTunnels()
 	return nil
 }
 
 // ConfigHash fingerprints hosts.toml and rules.toml.
-func ConfigHash() string {
+func ConfigHash() string { return HashConfigFiles(paths.Hosts(), paths.Rules()) }
+
+// HashConfigFiles is ConfigHash over two files; only their base names count.
+func HashConfigFiles(hosts, rules string) string {
 	h := sha256.New()
-	for _, p := range []string{paths.Hosts(), paths.Rules()} {
+	for _, p := range []string{hosts, rules} {
 		b, _ := os.ReadFile(p)
 		fmt.Fprintf(h, "%s\x00%d\x00", filepath.Base(p), len(b))
 		h.Write(b)
@@ -311,6 +315,7 @@ func (d *Daemon) unlockData(key *[32]byte, salt []byte) error {
 
 func (d *Daemon) lock() {
 	d.lockData()
+	d.closeTunnelsIf("lock", func(*tunnelEntry) bool { return true })
 	d.tgStop(false)
 }
 

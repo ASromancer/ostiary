@@ -44,6 +44,7 @@ func (d *Daemon) tgStart(token, bot string, chat, user int64, allow bool) (*tele
 		return nil, errors.New("ostiary is restarting")
 	}
 	if d.tg.cancel != nil {
+		d.tg.svc.Retire()
 		d.tg.cancel()
 		d.tg.svc.Stop()
 	}
@@ -83,6 +84,9 @@ func (d *Daemon) tgStop(permanent bool) {
 	defer d.tg.mu.Unlock()
 	d.tg.closed = d.tg.closed || permanent
 	if d.tg.cancel != nil {
+		if !permanent { // drain cancels the queue itself, and its edits say why
+			d.tg.svc.Retire()
+		}
 		d.tg.cancel()
 		d.tg.svc.Stop()
 		if !permanent { // lock: drop the service (Go strings cannot be wiped, so the token lingers until GC)
@@ -154,6 +158,16 @@ func (d *Daemon) tgResolve(id int, choice string, user int64) error {
 	return err
 }
 
+// ApprovedHash returns the config hash the human approved, from the vault ("" while locked).
+func (s *Service) ApprovedHash(_ *Empty, r *ApprovedHashReply) error {
+	s.d.mu.Lock()
+	defer s.d.mu.Unlock()
+	if s.d.data != nil {
+		r.Hash = s.d.data.ConfigHash
+	}
+	return nil
+}
+
 // TelegramStatus reports the Telegram state for the UI. The token never leaves the vault.
 func (s *Service) TelegramStatus(_ *Empty, r *TelegramReply) error {
 	d := s.d
@@ -168,7 +182,9 @@ func (s *Service) TelegramStatus(_ *Empty, r *TelegramReply) error {
 	if svc := d.tgService(); svc != nil {
 		st := svc.Status()
 		r.Paired, r.Pairing, r.AllowDestructive, r.LastError = st.Paired, st.Pairing, st.AllowDestructive, st.LastError
-		r.PairCode = st.PairCode
+		if c := st.Candidate; c != nil {
+			r.CandUser, r.CandName, r.CandID = c.Username, c.Name, c.UserID
+		}
 		if !st.PairExpires.IsZero() {
 			r.PairExpires = st.PairExpires.Unix()
 		}
@@ -192,6 +208,12 @@ func (d *Daemon) telegramAdmin(a *AdminArgs, data any, r *AdminReply) error {
 			return errors.New("approval ticket has no bot; start again")
 		}
 		return d.telegramPair(tk, r)
+	case "telegram-confirm":
+		c, ok := data.(*tgCand)
+		if !ok {
+			return errors.New("approval ticket has no account; start again")
+		}
+		return d.telegramConfirm(c, r)
 	case "telegram-settings":
 		on := a.Name == "destructive-on"
 		d.mu.Lock()
@@ -245,46 +267,68 @@ func (d *Daemon) telegramPair(tk *tgTicket, r *AdminReply) error {
 	if err != nil {
 		return err
 	}
-	p := svc.BeginPairing("")
-	code := svc.PairCode()
-	go d.tgFinishPairing(svc, tk.bot, p)
-	r.Out = fmt.Sprintf("@%s %s", tk.bot, code)
+	svc.BeginPairing("")
+	r.Out = fmt.Sprintf("@%s %s", tk.bot, svc.PairCode())
 	return nil
 }
 
-// tgFinishPairing stores the chat and user ids once the human has sent /pair <code>.
-func (d *Daemon) tgFinishPairing(svc *telegram.Service, bot string, p *telegram.Pairing) {
-	ctx, cancel := context.WithTimeout(context.Background(), 11*time.Minute)
-	defer cancel()
-	chat, user, err := p.Result(ctx)
+// tgCand is what a telegram-confirm ticket carries: the account the human sees in the dialog.
+type tgCand struct {
+	id              int64
+	user, name, bot string
+}
+
+// telegramConfirmBegin captures the pending candidate for a ticket.
+func (d *Daemon) telegramConfirmBegin() (*tgCand, error) {
+	svc := d.tgService()
+	if svc == nil {
+		return nil, errors.New("chưa có yêu cầu ghép nối Telegram nào")
+	}
+	st := svc.Status()
+	if st.Candidate == nil {
+		return nil, errors.New("chưa có tài khoản Telegram nào gửi mã ghép nối")
+	}
+	c := st.Candidate
+	return &tgCand{id: c.UserID, user: c.Username, name: c.Name, bot: st.Bot}, nil
+}
+
+func (c *tgCand) String() string {
+	who := "id " + strconv.FormatInt(c.id, 10)
+	if c.user != "" {
+		who = "@" + c.user + " (id " + strconv.FormatInt(c.id, 10) + ", " + c.name + ")"
+	}
+	return who
+}
+
+// telegramConfirm stores the chat and user ids of the account the human approved.
+func (d *Daemon) telegramConfirm(c *tgCand, r *AdminReply) error {
+	svc := d.tgService()
+	if svc == nil {
+		return errors.New("chưa có yêu cầu ghép nối Telegram nào")
+	}
+	cand, err := svc.Confirm(c.id)
 	if err != nil {
-		svc.SetError(fmt.Errorf("Telegram: ghép đôi không thành công (%v)", err))
-		return
+		return err
 	}
-	uname := svc.Status().User
-	err = func() error {
-		d.mu.Lock()
-		defer d.mu.Unlock()
-		if d.tgService() != svc || d.data == nil {
-			return errors.New("superseded")
-		}
-		d.data.Settings[setTGChat], d.data.Settings[setTGUser] = strconv.FormatInt(chat, 10), strconv.FormatInt(user, 10)
-		d.data.Settings[setTGUser+"name"] = uname
-		return d.saveVault()
-	}()
+	d.mu.Lock()
+	if d.data == nil {
+		d.mu.Unlock()
+		return errors.New("vault is locked; run 'ostiary unlock' first")
+	}
+	d.data.Settings[setTGChat], d.data.Settings[setTGUser] = strconv.FormatInt(cand.ChatID, 10), strconv.FormatInt(cand.UserID, 10)
+	d.data.Settings[setTGUser+"name"] = cand.Username
+	err = d.saveVault()
+	d.mu.Unlock()
 	if err != nil {
-		if err.Error() != "superseded" {
-			svc.SetError(err)
-		}
-		return
+		svc.SetError(err)
+		return err
 	}
-	who := "id " + strconv.FormatInt(user, 10)
-	if uname != "" {
-		who = "@" + uname + " (id " + strconv.FormatInt(user, 10) + ")"
-	}
+	who := (&tgCand{id: cand.UserID, user: cand.Username, name: cand.Name}).String()
 	d.log.Write(audit.Entry{Kind: "admin", Cmd: "telegram-paired", Decision: "allow",
-		Note: fmt.Sprintf("bot @%s, telegram user %s, chat id %d", bot, who, chat)})
+		Note: fmt.Sprintf("bot @%s, telegram user %s, chat id %d", c.bot, who, cand.ChatID)})
 	if d.q.Notify != nil {
-		_ = d.q.Notify(approval.Notice{Title: "Ostiary", Body: fmt.Sprintf("Ostiary đã kết nối với Telegram %s qua @%s", who, bot)})
+		_ = d.q.Notify(approval.Notice{Title: "Ostiary", Body: fmt.Sprintf("Ostiary đã kết nối với Telegram %s qua @%s", who, c.bot)})
 	}
+	r.Out = "telegram paired with " + who
+	return nil
 }

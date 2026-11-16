@@ -184,6 +184,9 @@ type HostListReply struct {
 	Trusted map[string]bool // host key pinned in known_hosts
 }
 
+// ApprovedHashReply is the vault's hash of the last approved config (not secret).
+type ApprovedHashReply struct{ Hash string }
+
 // TelegramReply is the Telegram state for the UI and doctor. It never
 // contains the token.
 type TelegramReply struct {
@@ -194,6 +197,8 @@ type TelegramReply struct {
 	Pairing          bool
 	AllowDestructive bool
 	LastError        string
-	PairCode         string // while Pairing: the code to send to the bot (cookie-guarded UI only)
-	PairExpires      int64  // unix seconds
+	PairExpires      int64 // unix seconds. The pairing code is never in a status: agents can read it.
+	// A Telegram account that sent the right code and waits for telegram-confirm (not secret).
+	CandUser, CandName string
+	CandID             int64
 }

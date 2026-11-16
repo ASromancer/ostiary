@@ -314,7 +314,8 @@ func TestAPIConfigDiff(t *testing.T) {
 	os.Mkdir(appr, 0o700)
 	os.WriteFile(hosts, []byte("a\nb\nc\n"), 0o600)
 	os.WriteFile(filepath.Join(appr, "hosts.toml"), []byte("a\nc\n"), 0o600)
-	s := newServer(Options{Backend: &fakeBackend{}, HostsFile: hosts, RulesFile: rules, ApprovedDir: appr}, 8123)
+	fb := &fakeBackend{hash: daemon.HashConfigFiles(filepath.Join(appr, "hosts.toml"), filepath.Join(appr, "rules.toml"))}
+	s := newServer(Options{Backend: fb, HostsFile: hosts, RulesFile: rules, ApprovedDir: appr}, 8123)
 	w := api(t, s, "GET", "/api/config/diff", "")
 	var got []struct {
 		Name     string
@@ -329,6 +330,16 @@ func TestAPIConfigDiff(t *testing.T) {
 	}
 	if got[1].Name != "rules.toml" || got[1].Approved || got[1].Diff != "" {
 		t.Fatalf("rules without a copy: %+v", got[1])
+	}
+	// A copy that does not match the vault's hash (an agent wrote it) gives no diff, only a warning.
+	os.WriteFile(filepath.Join(appr, "hosts.toml"), []byte("a\nb\nc\n"), 0o600)
+	w = api(t, s, "GET", "/api/config/diff", "")
+	var bad []struct {
+		Approved    bool
+		Diff, Error string
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &bad); err != nil || bad[0].Approved || bad[0].Diff != "" || !strings.Contains(bad[0].Error, "không xác minh được") {
+		t.Fatalf("tampered copy: %v %s", err, w.Body.String())
 	}
 }
 

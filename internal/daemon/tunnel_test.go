@@ -190,3 +190,54 @@ func TestTunnelMinTTLAndNoApprovalSteal(t *testing.T) {
 		t.Fatalf("approval was consumed: %+v", r)
 	}
 }
+
+func openTunnel(t *testing.T, h *harness, target string) TunnelReply {
+	t.Helper()
+	r := h.tunnel(TunnelArgs{Target: target})
+	h.call("Decide", &DecideArgs{ID: r.Pending, Code: h.lastCode(), Choice: "y"}, &Empty{})
+	r = h.tunnel(TunnelArgs{Target: target, ApprovalID: r.Pending})
+	if r.Local == "" {
+		t.Fatalf("%+v", r)
+	}
+	return r
+}
+
+func TestTunnelClosesOnLockAndConfigChange(t *testing.T) {
+	target := echo(t)
+	h := tunnelHarness(t, target)
+	r := openTunnel(t, h, target)
+	h.d.lock()
+	if _, err := net.DialTimeout("tcp", r.Local, time.Second); err == nil {
+		t.Fatal("tunnel still open after lock")
+	}
+	if !strings.Contains(h.auditText(), "reason=lock") {
+		t.Fatalf("audit:\n%s", h.auditText())
+	}
+	// removing the target from the host closes the tunnel on the next config load
+	h = tunnelHarness(t, target)
+	r = openTunnel(t, h, target)
+	b, _ := os.ReadFile(paths.Hosts())
+	os.WriteFile(paths.Hosts(), []byte(strings.Replace(string(b), "tunnels = [\""+target+"\"]\n", "", 1)), 0o600)
+	if err := h.d.loadConfig(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := net.DialTimeout("tcp", r.Local, time.Second); err == nil {
+		t.Fatal("tunnel still open after its target was removed")
+	}
+	if !strings.Contains(h.auditText(), "reason=config") {
+		t.Fatalf("audit:\n%s", h.auditText())
+	}
+}
+
+func TestTunnelRefusedOnReadonlyHost(t *testing.T) {
+	target := echo(t)
+	h := tunnelHarness(t, target)
+	b, _ := os.ReadFile(paths.Hosts())
+	os.WriteFile(paths.Hosts(), []byte(strings.Replace(string(b), "agent = true\n", "agent = true\nprofile = \"readonly\"\n", 1)), 0o600)
+	if err := h.d.loadConfig(); err != nil {
+		t.Fatal(err)
+	}
+	if r := h.tunnel(TunnelArgs{Target: target}); r.Code != CodeBlocked || r.Pending != 0 || !strings.Contains(r.Msg, "read-only") {
+		t.Fatalf("%+v", r)
+	}
+}

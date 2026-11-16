@@ -124,8 +124,10 @@ func (b *Bot) scrub(err error) error {
 }
 
 type User struct {
-	ID       int64  `json:"id"`
-	Username string `json:"username"`
+	ID        int64  `json:"id"`
+	Username  string `json:"username"`
+	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
 }
 type Chat struct {
 	ID   int64  `json:"id"`
@@ -213,8 +215,15 @@ type Options struct {
 type Status struct {
 	Paired, Pairing, AllowDestructive bool
 	Bot, User, LastError              string // User: Telegram @username of the paired account
-	PairCode                          string // the code to send while pairing; "" otherwise
 	PairExpires                       time.Time
+	Candidate                         *Candidate // who sent a valid /pair, waiting for the human's confirmation
+}
+
+// Candidate is a Telegram account that sent the right pairing code. It is
+// not paired until the human confirms on the computer (Confirm).
+type Candidate struct {
+	UserID, ChatID int64
+	Username, Name string // sanitised: shown to the human
 }
 
 type sent struct {
@@ -233,12 +242,7 @@ type Pairing struct {
 	start   time.Time
 	expires time.Time
 	fails   int
-	res     chan pairResult
-}
-
-type pairResult struct {
-	chat, user int64
-	err        error
+	cand    *Candidate // first valid /pair wins; later ones are told to wait
 }
 
 // Service sends requests to the paired chat and turns button presses into
@@ -297,7 +301,11 @@ func (s *Service) Status() Status {
 	st := Status{Paired: s.chat != 0 && s.user != 0, Pairing: s.pair != nil, AllowDestructive: s.allow,
 		Bot: s.botName, User: s.userName, LastError: le}
 	if s.pair != nil {
-		st.PairCode, st.PairExpires = s.pair.code, s.pair.expires
+		st.PairExpires = s.pair.expires
+		if c := s.pair.cand; c != nil {
+			cc := *c
+			st.Candidate = &cc
+		}
 	}
 	return st
 }
@@ -306,8 +314,7 @@ func (s *Service) Status() Status {
 func (s *Service) expireLocked() {
 	if p := s.pair; p != nil && s.Now().After(p.expires) {
 		s.pair = nil
-		s.lastErr = "Telegram: mã ghép đôi đã hết hạn"
-		p.res <- pairResult{err: errors.New("mã ghép đôi đã hết hạn")}
+		s.lastErr = "Telegram: mã ghép nối đã hết hạn"
 	}
 }
 
@@ -336,27 +343,8 @@ func (s *Service) pollResult(err error) {
 	}
 }
 
-// Pair starts pairing with code ("" = a new one) and blocks until the human
-// sends "/pair <code>" from a private chat, five wrong codes arrive, the
-// code expires, or ctx ends. Run must be running to receive the message.
-func (s *Service) Pair(ctx context.Context, code string) (chatID, userID int64, err error) {
-	p := s.BeginPairing(code)
-	select {
-	case r := <-p.res:
-		return r.chat, r.user, r.err
-	case <-ctx.Done():
-		s.endPairing(p, ctx.Err())
-		return 0, 0, ctx.Err()
-	case <-time.After(pairTTL):
-		s.endPairing(p, errors.New("mã ghép đôi đã hết hạn"))
-		r := <-p.res
-		return 0, 0, r.err
-	}
-}
-
-// BeginPairing starts pairing without waiting; the result arrives on the
-// returned pairing's channel (see Pair for the blocking form). A new
-// pairing replaces the previous one.
+// BeginPairing starts a pairing window. A valid /pair <code> only records a
+// Candidate; Confirm pairs it. A new pairing replaces the previous one.
 func (s *Service) BeginPairing(code string) *Pairing {
 	if code == "" {
 		if s.o.OnPairCode != nil {
@@ -366,14 +354,10 @@ func (s *Service) BeginPairing(code string) *Pairing {
 		}
 	}
 	now := s.Now()
-	p := &Pairing{code: code, start: now, expires: now.Add(pairTTL), res: make(chan pairResult, 1)}
+	p := &Pairing{code: code, start: now, expires: now.Add(pairTTL)}
 	s.mu.Lock()
-	old := s.pair
 	s.pair = p
 	s.mu.Unlock()
-	if old != nil {
-		old.res <- pairResult{err: errors.New("đã bắt đầu ghép đôi mới")}
-	}
 	return p
 }
 
@@ -387,23 +371,25 @@ func (s *Service) PairCode() string {
 	return s.pair.code
 }
 
-// Result waits for the pairing outcome.
-func (p *Pairing) Result(ctx context.Context) (chat, user int64, err error) {
-	select {
-	case r := <-p.res:
-		return r.chat, r.user, r.err
-	case <-ctx.Done():
-		return 0, 0, ctx.Err()
-	}
-}
-
-func (s *Service) endPairing(p *Pairing, err error) {
+// Confirm pairs the candidate whose Telegram user id is user, once the human
+// approved it on the computer. It tells the account in Telegram.
+func (s *Service) Confirm(user int64) (Candidate, error) {
 	s.mu.Lock()
-	if s.pair == p {
-		s.pair = nil
-		p.res <- pairResult{err: err}
+	s.expireLocked()
+	p := s.pair
+	if p == nil || p.cand == nil || p.cand.UserID != user {
+		s.mu.Unlock()
+		return Candidate{}, errors.New("không còn yêu cầu ghép nối nào để xác nhận")
 	}
+	c := *p.cand
+	s.pair = nil
+	s.chat, s.user, s.userName = c.ChatID, c.UserID, c.Username
+	s.lastErr = ""
 	s.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, _ = s.o.Bot.send(ctx, c.ChatID, "Đã kết nối với Ostiary trên "+s.hostname, "", nil)
+	return c, nil
 }
 
 func randDigits(n int) string {
@@ -471,17 +457,19 @@ func (s *Service) message(ctx context.Context, m *Message) {
 	var reply string
 	switch {
 	case subtle.ConstantTimeCompare([]byte(code), []byte(p.code)) == 1:
-		s.pair = nil
-		s.chat, s.user, s.userName = m.Chat.ID, m.From.ID, m.From.Username
-		s.lastErr = ""
-		p.res <- pairResult{chat: s.chat, user: s.user}
-		reply = "Đã kết nối với Ostiary trên " + s.hostname
+		if p.cand != nil {
+			reply = "Đã có yêu cầu ghép nối đang chờ xác nhận."
+			break
+		}
+		name := field(strings.TrimSpace(m.From.FirstName+" "+m.From.LastName), maxField)
+		p.cand = &Candidate{UserID: m.From.ID, ChatID: m.Chat.ID, Username: field(m.From.Username, maxField), Name: name}
+		reply = "Đang chờ xác nhận trên máy…"
 	default:
 		p.fails++
 		reply = "Mã không đúng."
 		if p.fails >= maxPairFails {
 			s.pair = nil
-			p.res <- pairResult{err: errors.New("nhập sai mã 10 lần; hãy bắt đầu lại")}
+			s.lastErr = "Telegram: ghép nối không thành công (nhập sai mã 10 lần; hãy bắt đầu lại)"
 			reply = "Nhập sai quá nhiều lần. Hãy bắt đầu lại trong Ostiary."
 		}
 	}
@@ -662,6 +650,9 @@ func (s *Service) callback(ctx context.Context, c *Callback) {
 	decided := valid && rec.decided
 	s.mu.Unlock()
 	switch {
+	case err == nil && rec == nil: // sent before a restart, lock or re-pair
+		answer("yêu cầu không còn")
+		return
 	case !valid:
 		answer("không hợp lệ")
 		return
@@ -686,18 +677,6 @@ func (s *Service) callback(ctx context.Context, c *Callback) {
 
 // Resolved edits the request's message once it is decided, here or elsewhere.
 func (s *Service) Resolved(id int, d approval.Decision) {
-	s.mu.Lock()
-	rec := s.sent[id]
-	if rec == nil || rec.decided {
-		s.mu.Unlock()
-		return
-	}
-	rec.decided = true
-	time.AfterFunc(10*time.Minute, func() { s.mu.Lock(); delete(s.sent, id); s.mu.Unlock() })
-	chat := s.chat
-	s.wg.Add(1)
-	s.mu.Unlock()
-
 	var line string
 	at := s.Now().Local().Format("15:04")
 	switch {
@@ -712,6 +691,38 @@ func (s *Service) Resolved(id int, d approval.Decision) {
 	default:
 		line = "Đã xử lý trên máy lúc " + at
 	}
+	s.finish(id, line)
+}
+
+// Retire strips the buttons from every undecided message before this service
+// is dropped (lock, unpair, re-pair): its presses could no longer be answered.
+func (s *Service) Retire() {
+	s.mu.Lock()
+	var ids []int
+	for id, r := range s.sent {
+		if !r.decided {
+			ids = append(ids, id)
+		}
+	}
+	s.mu.Unlock()
+	for _, id := range ids {
+		s.finish(id, "⛔ Telegram đã ngắt kết nối — hãy duyệt trên máy")
+	}
+}
+
+func (s *Service) finish(id int, line string) {
+	s.mu.Lock()
+	rec := s.sent[id]
+	if rec == nil || rec.decided {
+		s.mu.Unlock()
+		return
+	}
+	rec.decided = true
+	time.AfterFunc(10*time.Minute, func() { s.mu.Lock(); delete(s.sent, id); s.mu.Unlock() })
+	chat := s.chat
+	s.wg.Add(1)
+	s.mu.Unlock()
+
 	go func() {
 		defer s.wg.Done()
 		<-rec.ready

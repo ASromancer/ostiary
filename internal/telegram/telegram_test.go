@@ -220,57 +220,92 @@ func TestValidToken(t *testing.T) {
 	}
 }
 
-func TestPairing(t *testing.T) {
+func until(t *testing.T, what string, ok func() bool) {
+	t.Helper()
+	for end := time.Now().Add(3 * time.Second); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
+		if ok() {
+			return
+		}
+	}
+	t.Fatal("timeout waiting for", what)
+}
+
+func pairMsgID(n int, chatType string, chat, user int64, text string) Update {
+	u := pairMsg(chatType, chat, user, text)
+	u.UpdateID = n
+	return u
+}
+
+// A valid /pair only makes a candidate; nothing is paired until Confirm.
+func TestPairingNeedsConfirm(t *testing.T) {
 	e := newEnv(t, 0, 0, true)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	e.f.push(pairMsg("group", -5, 7, "/pair 111111")) // ignored
-	e.f.push(pairMsg("private", 7, 7, "/pair 111111"))
-	chat, user, err := e.s.Pair(ctx, "111111")
-	if err != nil || chat != 7 || user != 7 {
-		t.Fatal(chat, user, err)
+	e.s.BeginPairing("111111")
+	e.f.push(pairMsgID(1, "group", -5, 7, "/pair 111111")) // ignored
+	u := pairMsgID(2, "private", 7, 7, "/pair 111111")
+	u.Message.From.Username, u.Message.From.FirstName, u.Message.From.LastName = "alice", "Al", "Ice"
+	e.f.push(u)
+	until(t, "candidate", func() bool { return e.s.Status().Candidate != nil })
+	st := e.s.Status()
+	if st.Paired || !st.Pairing || st.Candidate.UserID != 7 || st.Candidate.Username != "alice" || st.Candidate.Name != "Al Ice" {
+		t.Fatalf("%+v %+v", st, st.Candidate)
 	}
-	if !e.s.Status().Paired {
-		t.Fatal("not paired")
-	}
-	m := e.f.find("sendMessage", 0)
-	if m == nil || !strings.Contains(m.Body["text"].(string), "Đã kết nối với Ostiary trên") {
+	if m := e.f.find("sendMessage", 0); m == nil || !strings.Contains(m.Body["text"].(string), "Đang chờ xác nhận") {
 		t.Fatalf("%v", m)
+	}
+	// first valid candidate wins: another account with the right code is told so and changes nothing
+	e.f.push(pairMsgID(3, "private", 8, 8, "/pair 111111"))
+	if m := e.f.findWhere("sendMessage", 0, func(b map[string]any) bool { return strings.Contains(b["text"].(string), "yêu cầu ghép") }); m == nil {
+		t.Fatal("second account not told")
+	}
+	if c := e.s.Status().Candidate; c == nil || c.UserID != 7 {
+		t.Fatalf("candidate replaced: %+v", c)
+	}
+	if _, err := e.s.Confirm(8); err == nil {
+		t.Fatal("confirmed an account that is not the candidate")
+	}
+	c, err := e.s.Confirm(7)
+	if err != nil || c.ChatID != 7 {
+		t.Fatal(c, err)
+	}
+	st = e.s.Status()
+	if !st.Paired || st.Pairing || st.User != "alice" {
+		t.Fatalf("%+v", st)
+	}
+	if m := e.f.findWhere("sendMessage", 0, func(b map[string]any) bool {
+		return strings.Contains(b["text"].(string), "Đã kết nối với Ostiary trên")
+	}); m == nil {
+		t.Fatal("no confirmation message")
+	}
+	if _, err := e.s.Confirm(7); err == nil {
+		t.Fatal("confirmed twice")
 	}
 }
 
 func TestPairingGroupIgnored(t *testing.T) {
 	e := newEnv(t, 0, 0, true)
-	p := e.s.BeginPairing("222222")
+	e.s.BeginPairing("222222")
 	e.f.push(pairMsg("group", -5, 7, "/pair 222222"))
 	time.Sleep(100 * time.Millisecond)
-	if e.s.Status().Paired || e.f.count("sendMessage") != 0 {
+	if e.s.Status().Paired || e.s.Status().Candidate != nil || e.f.count("sendMessage") != 0 {
 		t.Fatal("group message was acted on")
 	}
-	_ = p
 }
 
-func TestPairingWrongCodesEndAfterFive(t *testing.T) {
+func TestPairingWrongCodesEndAfterTen(t *testing.T) {
 	e := newEnv(t, 0, 0, true)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	e.s.BeginPairing("123456")
 	for i := 0; i < 10; i++ {
-		u := pairMsg("private", 7, 7, "/pair 000000")
-		u.UpdateID = i + 1
-		e.f.push(u)
+		e.f.push(pairMsgID(i+1, "private", 7, 7, "/pair 000000"))
 	}
-	_, _, err := e.s.Pair(ctx, "123456")
-	if err == nil || !strings.Contains(err.Error(), "10 lần") {
-		t.Fatal(err)
-	}
-	if e.s.Status().Pairing || e.s.Status().Paired {
-		t.Fatal("state")
+	until(t, "pairing to end", func() bool { return !e.s.Status().Pairing })
+	if st := e.s.Status(); st.Paired || !strings.Contains(st.LastError, "10 lần") {
+		t.Fatalf("%+v", st)
 	}
 	// the right code no longer works
-	e.f.push(pairMsg("private", 7, 7, "/pair 123456"))
+	e.f.push(pairMsgID(20, "private", 7, 7, "/pair 123456"))
 	time.Sleep(100 * time.Millisecond)
-	if e.s.Status().Paired {
-		t.Fatal("paired after pairing ended")
+	if st := e.s.Status(); st.Paired || st.Candidate != nil {
+		t.Fatal("candidate after pairing ended")
 	}
 }
 
@@ -280,14 +315,29 @@ func TestPairingExpires(t *testing.T) {
 	e.s.mu.Lock()
 	e.s.Now = func() time.Time { return now }
 	e.s.mu.Unlock()
-	p := e.s.BeginPairing("333333")
+	e.s.BeginPairing("333333")
 	now = now.Add(11 * time.Minute)
 	e.f.push(pairMsg("private", 7, 7, "/pair 333333"))
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_, _, err := p.Result(ctx)
-	if err == nil || !strings.Contains(err.Error(), "hết hạn") || e.s.Status().Paired {
-		t.Fatal(err)
+	time.Sleep(100 * time.Millisecond)
+	st := e.s.Status()
+	if st.Paired || st.Candidate != nil || !strings.Contains(st.LastError, "hết hạn") {
+		t.Fatalf("%+v", st)
+	}
+}
+
+// A candidate waiting for confirmation dies with the pairing window.
+func TestCandidateExpires(t *testing.T) {
+	e := newEnv(t, 0, 0, true)
+	now := time.Now()
+	e.s.mu.Lock()
+	e.s.Now = func() time.Time { return now }
+	e.s.mu.Unlock()
+	e.s.BeginPairing("666666")
+	e.f.push(pairMsg("private", 7, 7, "/pair 666666"))
+	until(t, "candidate", func() bool { return e.s.Status().Candidate != nil })
+	now = now.Add(11 * time.Minute)
+	if _, err := e.s.Confirm(7); err == nil || e.s.Status().Paired {
+		t.Fatal("confirmed after the window closed")
 	}
 }
 
@@ -419,7 +469,11 @@ func TestCallbackRejected(t *testing.T) {
 	}
 	e.f.push(bad...)
 	for i := range bad {
-		if a := answerText(t, e, i); a != "không hợp lệ" {
+		want := "không hợp lệ"
+		if i == 3 { // unknown id: sent before a restart, lock or re-pair
+			want = "yêu cầu không còn"
+		}
+		if a := answerText(t, e, i); a != want {
 			t.Fatalf("%d: %s", i, a)
 		}
 	}
@@ -512,7 +566,7 @@ func TestPollErrorsBackOffAndRecord(t *testing.T) {
 
 func TestPairingIgnoresOldBacklog(t *testing.T) {
 	e := newEnv(t, 0, 0, true)
-	p := e.s.BeginPairing("444444")
+	e.s.BeginPairing("444444")
 	old := pairMsg("private", 7, 7, "/pair 000000")
 	old.Message.Date = time.Now().Add(-time.Hour).Unix()
 	for i := 0; i < 12; i++ {
@@ -527,10 +581,9 @@ func TestPairingIgnoresOldBacklog(t *testing.T) {
 	good.UpdateID = 99
 	good.Message.From.Username = "alice"
 	e.f.push(good)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	if _, _, err := p.Result(ctx); err != nil || e.s.Status().User != "alice" {
-		t.Fatal(err)
+	until(t, "candidate", func() bool { return e.s.Status().Candidate != nil })
+	if c := e.s.Status().Candidate; c.Username != "alice" {
+		t.Fatal(c)
 	}
 }
 
@@ -621,5 +674,16 @@ func TestSingleFailureNotShown(t *testing.T) {
 	e.s.pollResult(nil)
 	if e.s.Status().LastError != "" {
 		t.Fatal("not cleared")
+	}
+}
+
+func TestRetireStripsButtons(t *testing.T) {
+	e := newEnv(t, 7, 7, true)
+	e.pending[4] = true
+	e.s.Notify(req(4, "mutate"))
+	nonce(t, e, 4)
+	e.s.Retire()
+	if m := e.f.find("editMessageText", 0); m == nil || !strings.Contains(m.Body["text"].(string), "ngắt kết nối") {
+		t.Fatalf("%v", m)
 	}
 }

@@ -1,7 +1,12 @@
 package daemon
 
 import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -90,19 +95,67 @@ func TestTelegramPairBoundToTicketBot(t *testing.T) {
 	}
 }
 
-func TestTelegramStatusShowsPairCode(t *testing.T) {
+// The pairing code is secret to the human's tab: no status an agent can read carries it.
+func TestTelegramStatusNeverShowsPairCode(t *testing.T) {
 	h := unlocked(t)
 	svc := telegram.New(telegram.Options{Bot: &telegram.Bot{Token: "1:x"}})
 	h.d.tg.svc = svc
 	var st TelegramReply
 	h.call("TelegramStatus", &Empty{}, &st)
-	if st.Pairing || st.PairCode != "" {
+	if st.Pairing {
 		t.Fatalf("%+v", st)
 	}
 	svc.BeginPairing("123456")
 	h.call("TelegramStatus", &Empty{}, &st)
-	if !st.Pairing || st.PairCode != "123456" || st.PairExpires <= time.Now().Unix() {
+	if !st.Pairing || st.PairExpires <= time.Now().Unix() || strings.Contains(fmt.Sprintf("%+v", st), "123456") {
 		t.Fatalf("%+v", st)
+	}
+}
+
+// Pairing needs the second admin op: until telegram-confirm the vault has no chat or user.
+func TestTelegramConfirmStoresIDs(t *testing.T) {
+	h := unlocked(t)
+	d := h.d
+	f := newTGFake(t)
+	d.tg.svc = telegram.New(telegram.Options{Bot: &telegram.Bot{Token: tgTok, Base: f.URL}})
+	d.tg.svc.SetBotName("my_bot")
+	var br BeginReply
+	if err := h.call("Begin", &BeginArgs{Op: "telegram-confirm"}, &br); err == nil {
+		t.Fatal("telegram-confirm began with no candidate")
+	}
+	d.tg.svc.BeginPairing("123456")
+	go d.tg.svc.Run(t.Context())
+	f.pairFrom(7, "alice", "Al Ice", "123456")
+	waitCand(t, h)
+	var st TelegramReply
+	h.call("TelegramStatus", &Empty{}, &st)
+	if st.Paired || st.CandUser != "alice" || st.CandID != 7 || st.CandName != "Al Ice" {
+		t.Fatalf("%+v", st)
+	}
+	d.mu.Lock()
+	chat := d.data.Settings[setTGChat]
+	d.mu.Unlock()
+	if chat != "" {
+		t.Fatal("chat stored before the human confirmed")
+	}
+	if err := h.call("Begin", &BeginArgs{Op: "telegram-confirm", Name: "evil"}, &br); err != nil || !strings.Contains(br.Info, "@alice") {
+		t.Fatalf("%v %+v", err, br)
+	}
+	msg := d.adminMessage(&AdminArgs{Op: "telegram-confirm"}, &tgCand{id: 7, user: "alice", name: "Al Ice", bot: "my_bot"})
+	if !strings.Contains(msg, "@alice (id 7, Al Ice)") || !strings.Contains(msg, "bot @my_bot") || !strings.Contains(msg, "approve agent requests") {
+		t.Fatal(msg)
+	}
+	var ar AdminReply
+	if err := d.telegramAdmin(&AdminArgs{Op: "telegram-confirm"}, &tgCand{id: 99, user: "mallory", bot: "my_bot"}, &ar); err == nil {
+		t.Fatal("confirmed an account that was not the candidate")
+	}
+	if err := d.telegramAdmin(&AdminArgs{Op: "telegram-confirm"}, &tgCand{id: 7, user: "alice", bot: "my_bot"}, &ar); err != nil {
+		t.Fatal(err)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.data.Settings[setTGChat] != "7" || d.data.Settings[setTGUser] != "7" || d.data.Settings[setTGUser+"name"] != "alice" {
+		t.Fatalf("%v", d.data.Settings)
 	}
 }
 
@@ -113,4 +166,55 @@ func TestTelegramPairNameForcedEmpty(t *testing.T) {
 	if a.Name != "" {
 		t.Fatalf("name kept: %q", a.Name)
 	}
+}
+
+const tgTok = "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
+
+// tgFake is a tiny Bot API server: queued updates for getUpdates, ok for the rest.
+type tgFake struct {
+	*httptest.Server
+	mu  sync.Mutex
+	ups []map[string]any
+	n   int
+}
+
+func newTGFake(t *testing.T) *tgFake {
+	f := &tgFake{}
+	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		res := any(map[string]any{"message_id": 1})
+		if strings.HasSuffix(r.URL.Path, "/getUpdates") {
+			f.mu.Lock()
+			res, f.ups = f.ups, nil
+			f.mu.Unlock()
+			if res.([]map[string]any) == nil {
+				time.Sleep(20 * time.Millisecond)
+				res = []map[string]any{}
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": res})
+	}))
+	t.Cleanup(f.Close)
+	return f
+}
+
+func (f *tgFake) pairFrom(user int64, username, first, code string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.n++
+	f.ups = append(f.ups, map[string]any{"update_id": f.n, "message": map[string]any{
+		"message_id": f.n, "date": time.Now().Unix(), "text": "/pair " + code,
+		"chat": map[string]any{"id": user, "type": "private"},
+		"from": map[string]any{"id": user, "username": username, "first_name": "Al", "last_name": "Ice"}}})
+}
+
+func waitCand(t *testing.T, h *harness) {
+	t.Helper()
+	for end := time.Now().Add(3 * time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		var st TelegramReply
+		h.call("TelegramStatus", &Empty{}, &st)
+		if st.CandID != 0 {
+			return
+		}
+	}
+	t.Fatal("no candidate")
 }

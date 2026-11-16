@@ -20,6 +20,7 @@ type fakeBackend struct {
 	skipped *bool
 	tunnels []daemon.TunnelInfo
 	closed  []int
+	hash    string // the vault's approved config hash
 }
 
 func (f *fakeBackend) Status() (daemon.StatusReply, error) {
@@ -93,3 +94,5 @@ func (f *fakeBackend) TunnelClose(id int) error {
 func (f *fakeBackend) Telegram() (daemon.TelegramReply, error) {
 	return daemon.TelegramReply{Configured: true, Paired: true, Bot: "ostiary_bot", AllowDestructive: true}, nil
 }
+
+func (f *fakeBackend) ApprovedHash() (string, error) { return f.hash, nil }

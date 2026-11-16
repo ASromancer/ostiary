@@ -205,13 +205,19 @@ func (s *Server) routes(mux *http.ServeMux) {
 			Name     string `json:"name"`
 			Approved bool   `json:"approved"` // a last-approved copy exists
 			Diff     string `json:"diff"`
+			Error    string `json:"error,omitempty"`
 		}
 		out := []fileDiff{}
+		// The copies are plain files an agent can write: they only count when they match what the vault approved.
+		want, _ := b.ApprovedHash()
+		verified := want != "" && want == daemon.HashConfigFiles(filepath.Join(s.opt.ApprovedDir, "hosts.toml"), filepath.Join(s.opt.ApprovedDir, "rules.toml"))
 		for _, f := range []struct{ name, cur string }{{"hosts.toml", s.opt.HostsFile}, {"rules.toml", s.opt.RulesFile}} {
 			cur, _ := os.ReadFile(f.cur)
 			old, err := os.ReadFile(filepath.Join(s.opt.ApprovedDir, f.name))
 			d := fileDiff{Name: f.name, Approved: err == nil}
-			if err == nil {
+			if err == nil && !verified {
+				d.Approved, d.Error = false, "không xác minh được bản đã duyệt — xem file trực tiếp"
+			} else if err == nil {
 				d.Diff = unifiedDiff(string(old), string(cur))
 			}
 			out = append(out, d)

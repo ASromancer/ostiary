@@ -477,3 +477,5 @@ tr.sess td { padding: 0; background: var(--s2); border-bottom: 1px solid var(--b
 .tgleft { font-variant-numeric: tabular-nums; font-weight: 600; }
 #codehint { margin: 0 0 12px; color: var(--text2); font-size: var(--f13); }
 @media (max-width: 860px) { .sidebar { scrollbar-width: none; } .sidebar::-webkit-scrollbar { display: none; } .side-foot .linkbtn { flex: none; margin: 0; } }
+.cfgdiff p.warn { color: var(--warn); }
+.tgcand { font-weight: 700; font-size: var(--f15, 16px); padding: 10px 0; }

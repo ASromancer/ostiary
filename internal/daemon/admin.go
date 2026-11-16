@@ -28,6 +28,7 @@ var adminOps = map[string]bool{
 	"key-gen": true, "key-import": true, "key-rm": true, "key-export": true,
 	"init": true, "hooks": true, "autostart": true, "upgrade": true,
 	"telegram-pair": true, "telegram-unpair": true, "telegram-settings": true,
+	"telegram-confirm": true,
 }
 
 func (s *Service) Unlock(a *UnlockArgs, _ *Empty) error {
@@ -62,12 +63,12 @@ func (s *Service) Begin(a *BeginArgs, r *BeginReply) error {
 	if !adminOps[a.Op] {
 		return fmt.Errorf("unknown admin op %q", a.Op)
 	}
-	if a.Op == "telegram-pair" {
+	if a.Op == "telegram-pair" || a.Op == "telegram-confirm" {
 		a.Name = "" // the agent must not put text next to the bot name the human sees
 	}
 	switch a.Op {
 	case "reload", "host-set", "host-rm", "key-gen", "key-import", "key-rm", "key-export",
-		"telegram-pair", "telegram-unpair", "telegram-settings":
+		"telegram-pair", "telegram-unpair", "telegram-settings", "telegram-confirm":
 		// Fail before a ticket or dialog exists: Admin would reject these anyway, after the human authenticated.
 		if a.Op == "telegram-settings" && a.Name != "destructive-on" && a.Name != "destructive-off" {
 			return fmt.Errorf("telegram-settings must be destructive-on or destructive-off, not %q", a.Name)
@@ -124,6 +125,13 @@ func (s *Service) Begin(a *BeginArgs, r *BeginReply) error {
 		detail = a.Name + " " + fp
 		data = key
 	}
+	if a.Op == "telegram-confirm" {
+		c, err := s.d.telegramConfirmBegin()
+		if err != nil {
+			return err
+		}
+		data, detail, r.Info = c, c.String(), c.String()
+	}
 	if a.Op == "telegram-pair" {
 		// Resolve the bot now so the human approves a named bot, and bind the token to the ticket.
 		tk, err := telegramBegin(a.Pass)
@@ -140,7 +148,7 @@ func (s *Service) Begin(a *BeginArgs, r *BeginReply) error {
 func (s *Service) Admin(a *AdminArgs, r *AdminReply) error {
 	d := s.d
 	defer clear(a.Pass)
-	if a.Op == "telegram-pair" {
+	if a.Op == "telegram-pair" || a.Op == "telegram-confirm" {
 		a.Name = ""
 	}
 	op := a.Op + " " + a.Name
@@ -185,6 +193,10 @@ func (d *Daemon) adminMessage(a *AdminArgs, data any) string {
 	case "telegram-pair": // the bot, never the token
 		if tk, ok := data.(*tgTicket); ok {
 			return "connect Ostiary to Telegram bot @" + tk.bot + " so it can approve agent requests"
+		}
+	case "telegram-confirm":
+		if c, ok := data.(*tgCand); ok {
+			return fmt.Sprintf("pair Telegram account %s with bot @%s; it will be able to approve agent requests", c, c.bot)
 		}
 	case "telegram-unpair":
 		return "disconnect Telegram from Ostiary"
@@ -254,7 +266,7 @@ func (d *Daemon) admin(a *AdminArgs, data any, r *AdminReply) error {
 		return nil
 	case "upgrade":
 		return d.upgrade(a.Name, a.Force, r)
-	case "telegram-pair", "telegram-unpair", "telegram-settings":
+	case "telegram-pair", "telegram-unpair", "telegram-settings", "telegram-confirm":
 		return d.telegramAdmin(a, data, r)
 	case "autostart":
 		if d.setup.SetAutostart == nil {

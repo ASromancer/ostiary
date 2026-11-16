@@ -164,3 +164,25 @@ func TestForwardConnCap(t *testing.T) {
 		c.Close()
 	}
 }
+
+// A dropped pooled client must not strand the tunnel: the next local connection re-dials.
+func TestForwardSurvivesDroppedClient(t *testing.T) {
+	p, tg := newPoolTarget(t)
+	tn, err := p.Forward(tg, echoServer(t), time.Minute, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tn.Close()
+	p.Drop(tg.Name)
+	c, err := net.Dial("tcp", tn.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(5 * time.Second))
+	c.Write([]byte("hi"))
+	buf := make([]byte, 2)
+	if _, err := io.ReadFull(c, buf); err != nil || string(buf) != "hi" {
+		t.Fatalf("after Drop: %q %v", buf, err)
+	}
+}

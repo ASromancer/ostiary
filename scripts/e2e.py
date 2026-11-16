@@ -633,11 +633,22 @@ def main():
         FakeTelegram.push({"update_id": 1, "message": {"message_id": 1, "chat": {"id": 42, "type": "private"},
                                                        "from": {"id": 42, "username": "alice"}, "date": int(time.time()), "text": "/pair " + mt.group(1)}})
         for _ in range(50):
-            tgs = json.loads(ui.req("GET", "/api/telegram")[2])
-            if tgs.get("Paired"):
+            raw = ui.req("GET", "/api/telegram")[2]
+            tgs = json.loads(raw)
+            if tgs.get("CandID"):
                 break
             time.sleep(0.2)
-        check(tgs.get("Paired") and tgs.get("Bot") == "e2e_bot" and "Token" not in tgs, "telegram pairs on /pair <code>", str(tgs))
+        check(tgs.get("CandID") == 42 and tgs.get("CandUser") == "alice" and not tgs.get("Paired") and mt.group(1) not in raw,
+              "a valid /pair only makes a candidate; the status never carries the code", raw)
+        FakeTelegram.find("sendMessage", lambda b: "Đang chờ xác nhận" in b.get("text", ""))
+        st, _, body = ui.req("POST", "/api/admin/begin", {"Op": "telegram-confirm", "Name": "evil"})
+        tk = json.loads(body).get("Ticket")
+        check(st == 200 and "@alice" in json.loads(body).get("Info", ""), "telegram-confirm Begin names the Telegram account", body)
+        st2, _, body = ui.req("POST", "/api/admin/commit", {"Ticket": tk, "Op": "telegram-confirm", "Name": ""})
+        tgs = json.loads(ui.req("GET", "/api/telegram")[2])
+        check(st2 == 200 and tgs.get("Paired") and tgs.get("Bot") == "e2e_bot" and "Token" not in tgs,
+              "telegram pairs after telegram-confirm", body + str(tgs))
+        FakeTelegram.find("sendMessage", lambda b: "Đã kết nối" in b.get("text", ""))
         victimtg = os.path.join(remote, "victimtg")
         open(victimtg, "w").write("x")
         agent = subprocess.Popen([BIN, "run", "e2e", f"rm {victimtg}"], env=ENV, stdin=subprocess.DEVNULL,

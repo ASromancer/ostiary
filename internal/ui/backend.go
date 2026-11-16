@@ -23,6 +23,7 @@ type Backend interface {
 	Tunnels() ([]daemon.TunnelInfo, error)
 	TunnelClose(id int) error
 	Telegram() (daemon.TelegramReply, error)
+	ApprovedHash() (string, error) // the vault's hash of the approved config
 }
 
 type ServiceBackend struct{ S *daemon.Service }
@@ -74,4 +75,9 @@ func (b ServiceBackend) TunnelClose(id int) error {
 func (b ServiceBackend) Telegram() (r daemon.TelegramReply, err error) {
 	err = b.S.TelegramStatus(&daemon.Empty{}, &r)
 	return
+}
+func (b ServiceBackend) ApprovedHash() (string, error) {
+	var r daemon.ApprovedHashReply
+	err := b.S.ApprovedHash(&daemon.Empty{}, &r)
+	return r.Hash, err
 }

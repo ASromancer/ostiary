@@ -54,7 +54,7 @@ Before anything is installed, the signature over `SHA256SUMS` is verified agains
 
 Set `OSTIARY_NO_UPDATE_CHECK=1` in the daemon's environment to turn off the background check.
 
-Stop, restart and upgrade drain first: new commands get exit 103, running commands get up to 60 s to finish, pending approvals are cancelled (the agent sees a 101 with a restart message), then jobs are killed. `ostiary stop --now` (and "Cập nhật luôn" in the UI) skips the wait; SIGTERM and SIGINT drain too (a second signal skips the wait). The UI asks first when something is running.
+Stop, restart and upgrade drain first: new commands get exit 103, running commands get up to 60 s to finish, pending approvals are cancelled (the agent sees a 101 with a restart message), then jobs are killed. `ostiary stop --now` (and "Cập nhật luôn" in the UI) skips the wait (on Windows the installer upgrade always stops the daemon with the normal wait); SIGTERM and SIGINT drain too (a second signal skips the wait). The UI asks first when something is running.
 
 A vault in passphrase mode needs unlocking again after the restart. The web UI session is lost on restart: reopen Ostiary from its icon or with `ostiary open`. On macOS, run `ostiary install-service` once after updating from 0.2.0 so launchd keeps `ostiary stop` stopped. After an in-place macOS upgrade Finder's Get Info may still show the old version (cosmetic).
 
@@ -98,7 +98,7 @@ An ostiary run passes the remote command's exit code through unchanged. ostiary 
 | 100 | blocked by policy (forbidden, profile doesn't allow it, host not allowed) |
 | 101 | denied by the user or the approval timed out (default 120 s) |
 | 102 | daemon not running or vault locked |
-| 103 | ostiary is restarting (stop, upgrade): wait about 10 s and retry once; the CLI does this itself |
+| 103 | ostiary is restarting (stop, upgrade): wait about 10 s and retry; the CLI retries once itself, so if it still fails (a drain can take up to 60 s) wait and retry again |
 
 If ostiary itself produced the exit code, it also prints a stderr line starting with `ostiary:`. If the remote command happens to exit with 100–103, no such line appears.
 
@@ -116,8 +116,8 @@ $ ostiary tunnel open db1 127.0.0.1:5432 --ttl 30m
 tunnel 7 127.0.0.1:41873 -> 127.0.0.1:5432 via db1 until 15:42
 ```
 
-- Opening a tunnel always needs your approval (OS dialog, code or the UI), at level `destructive`; there is no 30-minute option. A target that is not in `tunnels` is refused with exit code 100 before any approval is asked.
-- The default lifetime is 1 hour, the maximum 8 hours. A tunnel closes on `ostiary tunnel close <id>`, when the TTL ends, or when the daemon stops or restarts. The audit log records the open and the close (reason, bytes in and out, connections). MCP has `tunnel_open`, `tunnel_list` and `tunnel_close`.
+- Opening a tunnel always needs your approval (OS dialog, code, the UI, or Telegram when "destructive approvals over Telegram" is on), at level `destructive`; there is no 30-minute option. A target that is not in `tunnels` is refused with exit code 100 before any approval is asked.
+- The default lifetime is 1 hour, the maximum 8 hours. A tunnel closes on `ostiary tunnel close <id>`, when the TTL ends, when the daemon stops or restarts, when the vault is locked, or when a config reload no longer allows it (host or target removed, agent access off, or the host is `readonly`). A host whose effective profile is `readonly` (including a repo `max_profile`) refuses tunnels with exit code 100, because a tunnel can carry writes. The audit log records the open and the close (reason, bytes in and out, connections). MCP has `tunnel_open`, `tunnel_list` and `tunnel_close`.
 - The TTL minimum is 1 minute. Each tunnel forwards at most 32 connections at once; dialing the target times out after 10 s. Any agent can list and close any tunnel (`tunnel list` is not scoped to its repo).
 - In the web UI, the Host page lists open tunnels (local port with a copy button, time left, traffic) with a confirmed "Đóng" button, and the host drawer has a "Cho phép tunnel tới" field for the allow-list. Tunnel approval cards have their own icon and no 30-minute option.
 - Known limit: while a tunnel is open, any local process of any user can connect to its loopback port. The TTL keeps that window short.
@@ -229,12 +229,13 @@ When the agent runs something destructive:
 
 Approve agent requests from your phone. Set up (UI, Kho khóa → Telegram; each step is an approved admin operation):
 
-1. Create a bot with @BotFather and paste its token. The daemon checks it with `getMe` and shows `@<bot>` and a 6-digit pairing code, which stays visible (with a countdown) in the UI while pairing is pending, also after a page reload.
-2. Send `/pair <code>` to the bot from a private chat. The code is valid for 10 minutes and allows 5 wrong attempts. The daemon then stores your chat and user id.
+1. Create a bot with @BotFather and paste its token. The daemon checks it with `getMe` and shows `@<bot>` and a 6-digit pairing code. The code is returned only to the tab that started pairing (it survives a reload of that tab) and is never in any status reply, so an agent cannot read it.
+2. Send `/pair <code>` to the bot from a private chat. The code is valid for 10 minutes and allows 10 wrong attempts. The bot answers "Đang chờ xác nhận trên máy…".
+3. In the UI, confirm the account ("Xác nhận tài khoản @user (id, tên)?"). This is a second approved admin operation (`telegram-confirm`) whose dialog names the Telegram account and the bot. Only then does the daemon store your chat and user id, and the bot answers "Đã kết nối…". The first account to send a valid code is the candidate; later ones are told a request is already waiting. Knowing the code is not enough to pair.
 
 New requests arrive as a message with the command in a monospace block and buttons: "Duyệt 1 lần", "30 phút" (not for destructive commands or tunnels) and "Từ chối". The message is edited when the request is decided, here or on the machine. A button press counts only from the paired user in the paired chat, with the request's one-time nonce, while the request is still pending; the audit log records it as `auth=telegram`. Admin operations (keys, hosts, upgrade, pairing) can never be approved from Telegram. "Cho phép duyệt lệnh phá hủy qua Telegram" (on by default) also covers tunnels; when off, those messages are informational with no buttons.
 
-The token is stored only in the encrypted vault (never logged or audited); unpairing deletes it. The approval dialog names the bot (`@<bot>`) you are connecting, and pairing writes an audit entry with the Telegram account (id and username) and shows a desktop notification. Downgrading to v0.2 drops the Telegram settings from the vault: pair again after upgrading. A command that is too long to show in full gets only a "Từ chối" button. The daemon talks only to `https://api.telegram.org`, with a 60 s long poll and backoff; `ostiary doctor` shows `Telegram: đã kết nối @<bot>` or the error. The command text, host and agent name pass through Telegram's servers.
+The token is stored only in the encrypted vault (never logged or audited); unpairing deletes it. The approval dialog names the bot (`@<bot>`) you are connecting, and pairing writes an audit entry with the Telegram account (id and username) and shows a desktop notification. Downgrading to v0.2 drops the Telegram settings from the vault (pair again after upgrading), and v0.2 rejects `profile = "strict"` in `hosts.toml` and `max_profile = "strict"` in a repo cap as an unknown profile: change them before downgrading. A command that is too long to show in full gets only a "Từ chối" button. The daemon talks only to `https://api.telegram.org`, with a 60 s long poll and backoff; `ostiary doctor` shows `Telegram: đã kết nối @<bot>` or the error. The command text, host and agent name pass through Telegram's servers.
 
 **Threat note:** whoever controls the paired Telegram account can approve requests. Protect it with Telegram two-step verification and a passcode, and turn off destructive approval over Telegram if you do not need it.
 

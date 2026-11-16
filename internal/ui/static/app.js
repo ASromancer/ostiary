@@ -396,7 +396,7 @@ async function confirmRunning(lockOnly) {
   const c = r.Commands || 0, jb = r.Jobs || 0, t = r.Tunnels || 0;
   if (!(lockOnly ? jb + t : c + jb + t)) return lockOnly && !(await confirmBox("Khóa vault?", "Khóa sẽ chặn mọi lệnh mới của agent cho tới khi bạn mở khóa lại.", { ok: "Khóa" })) ? null : "wait";
   const desc = c + " lệnh đang chạy, " + jb + " job, " + t + " tunnel";
-  if (lockOnly) return (await confirmBox("Khóa vault?", desc + ". Khóa sẽ chặn lệnh mới.", { ok: "Khóa" })) ? "wait" : null;
+  if (lockOnly) return (await confirmBox("Khóa vault?", desc + ". Khóa sẽ chặn lệnh mới và đóng các tunnel đang mở.", { ok: "Khóa" })) ? "wait" : null;
   const v = await askForm({ title: "Ostiary đang bận", desc: desc + ".", ok: "Chờ xong rồi cập nhật", alt: "Cập nhật luôn" });
   return !v ? null : v.alt ? "force" : "wait";
 }
@@ -535,7 +535,7 @@ function noreqWarn() {
   w.append(icon("alert"), el("div", null, k === "missing" ? "Chưa có vault: mọi lệnh của agent đang bị từ chối cho tới khi bạn tạo vault." : "Vault đang khóa: mọi lệnh của agent đang bị từ chối cho tới khi bạn mở khóa."), b);
 }
 // Vault-backed admin ops start nothing while the vault is locked or missing (the daemon refuses them too).
-const VAULT_OPS = new Set(["host-set", "host-rm", "reload", "key-gen", "key-import", "key-rm", "key-export", "telegram-pair", "telegram-unpair", "telegram-settings"]);
+const VAULT_OPS = new Set(["host-set", "host-rm", "reload", "key-gen", "key-import", "key-rm", "key-export", "telegram-pair", "telegram-confirm", "telegram-unpair", "telegram-settings"]);
 async function needVault() {
   if (!status || (!status.Locked && !status.VaultMissing)) return true;
   const miss = !!status.VaultMissing;
@@ -807,7 +807,8 @@ async function configDiffNodes() {
   files.forEach((f) => {
     const sec = el("div", "cfgfile");
     sec.appendChild(el("b", null, f.name));
-    if (!f.approved) sec.appendChild(el("p", "muted", "chưa có bản đã duyệt để so sánh"));
+    if (f.error) sec.appendChild(el("p", "warn", f.error));
+    else if (!f.approved) sec.appendChild(el("p", "muted", "chưa có bản đã duyệt để so sánh"));
     else if (!f.diff) sec.appendChild(el("p", "muted", "không đổi so với bản đã duyệt"));
     else sec.appendChild(diffNode(f.diff));
     box.appendChild(sec);
@@ -1411,8 +1412,23 @@ async function loadTelegram() {
   const g = nextGen("telegram");
   const t = await call("GET", "/api/telegram");
   if (stale("telegram", g)) return;
-  if (!t.Pairing) tgStop(); else if (!tgTimer) tgTimer = setInterval(() => { if (view === "keychain") loadTelegram().catch(() => {}); else tgStop(); }, 2000);
+  if (!t.Pairing) { tgStop(); tgForget(); } else if (!tgTimer) tgTimer = setInterval(() => { if (view === "keychain") loadTelegram().catch(() => {}); else tgStop(); }, 2000);
   box.replaceChildren(...tgNodes(t));
+  tickPair();
+}
+// The pairing code lives in this tab's sessionStorage only (a reload keeps it).
+const TG_KEY = "ostiary-tgpair";
+function tgRemember(out) {
+  const m = /^@(\S+) (\d+)$/.exec(out || "");
+  if (m) try { sessionStorage.setItem(TG_KEY, JSON.stringify({ bot: m[1], code: m[2] })); } catch (e) { /* ignore */ }
+}
+function tgForget() { try { sessionStorage.removeItem(TG_KEY); } catch (e) { /* ignore */ } }
+function tgCodeFor(t) {
+  try {
+    const v = JSON.parse(sessionStorage.getItem(TG_KEY) || "null");
+    if (v && v.bot === (t.Bot || "").replace(/^@/, "") && /^\d+$/.test(v.code)) return v.code;
+  } catch (e) { /* ignore */ }
+  return "";
 }
 function tickPair() {
   document.querySelectorAll(".tgleft").forEach((n) => {
@@ -1459,14 +1475,31 @@ function tgNodes(t) {
   if (t.Pairing) {
     const bot = t.Bot ? "@" + t.Bot.replace(/^@/, "") : "bot";
     out.push(el("p", null, "Đang chờ ghép nối với " + bot + "…"));
-    if (t.PairCode) {
+    // The code never comes from the server (agents can read it there): only this tab remembers it.
+    const code = tgCodeFor(t);
+    if (t.CandID) {
+      const who = (t.CandUser ? "@" + t.CandUser : "id " + t.CandID) + " (id " + t.CandID + (t.CandName ? ", " + t.CandName : "") + ")";
+      out.push(el("div", "tgcand", "Xác nhận tài khoản " + who + "?"),
+        el("p", "hint", "Chỉ xác nhận nếu đây đúng là tài khoản Telegram của bạn. Tài khoản này sẽ duyệt được yêu cầu của agent."));
+      const yes = button("Xác nhận ghép nối", "primary");
+      yes.addEventListener("click", () => busy(yes, async () => {
+        const o = await admin("telegram-confirm", "");
+        if (o) { tgForget(); ok(o); }
+        loadTelegram().catch(fail);
+      }));
+      const act = el("div", "tgact");
+      act.appendChild(yes);
+      out.push(act);
+    } else if (code) {
       const left = el("span", "tgleft");
       left._until = t.PairExpires * 1000;
-      out.push(el("div", "tgcode", t.PairCode.replace(/^(\d{3})(\d+)$/, "$1 $2")));
-      const how = el("p", null, "Gửi /pair " + t.PairCode + " cho " + bot + " (chat riêng). Còn ");
+      out.push(el("div", "tgcode", code.replace(/^(\d{3})(\d+)$/, "$1 $2")));
+      const how = el("p", null, "Gửi /pair " + code + " cho " + bot + " (chat riêng). Còn ");
       how.appendChild(left);
       out.push(how);
       tickPair();
+    } else {
+      out.push(el("p", "hint", "Mã ghép nối chỉ hiện trên tab đã bắt đầu. Nếu mất mã, hãy ngắt kết nối và bắt đầu lại."));
     }
     out.push(privacy);
     if (err) out.push(err);
@@ -1486,7 +1519,8 @@ function tgNodes(t) {
     const token = inp.value.trim();
     if (!token) { inp.focus(); return; }
     inp.value = "";
-    await admin("telegram-pair", "", { beginPass: token });
+    const o = await admin("telegram-pair", "", { beginPass: token });
+    if (o) tgRemember(o);
     loadTelegram().catch(fail);
   });
   go.addEventListener("click", submit);

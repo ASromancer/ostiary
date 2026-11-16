@@ -67,8 +67,7 @@ func (t *Tunnel) Close() {
 // Forward listens on 127.0.0.1:0 and forwards every connection to remote ("host:port" as seen
 // from the SSH server) over the pooled connection. It closes itself after ttl.
 func (p *Pool) Forward(tg Target, remote string, ttl time.Duration, onClose func(Stats)) (*Tunnel, error) {
-	c, err := p.client(tg)
-	if err != nil {
+	if _, err := p.client(tg); err != nil { // fail now if the server is unreachable
 		return nil, err
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -109,6 +108,10 @@ func (p *Pool) Forward(tg Target, remote string, ttl time.Duration, onClose func
 					t.mu.Unlock()
 					<-t.slots
 				}()
+				c, err := p.client(tg) // per connection: re-dials if the pooled client was dropped
+				if err != nil {
+					return
+				}
 				rc, err := dialTimeout(c, remote)
 				if err != nil {
 					return

@@ -12,6 +12,7 @@ import (
 	"github.com/ASromancer/ostiary/internal/approval"
 	"github.com/ASromancer/ostiary/internal/audit"
 	"github.com/ASromancer/ostiary/internal/hosts"
+	"github.com/ASromancer/ostiary/internal/policy"
 	"github.com/ASromancer/ostiary/internal/sshconn"
 )
 
@@ -102,18 +103,34 @@ func (d *Daemon) closeTunnel(id int, reason string) bool {
 }
 
 // closeTunnels closes every open tunnel (drain).
-func (d *Daemon) closeTunnels() {
+func (d *Daemon) closeTunnels() { d.closeTunnelsIf("restart", func(*tunnelEntry) bool { return true }) }
+
+// closeTunnelsIf closes the open tunnels for which drop reports true.
+func (d *Daemon) closeTunnelsIf(reason string, drop func(*tunnelEntry) bool) {
 	d.mu.Lock()
 	ids := make([]int, 0, len(d.tunnels))
-	for id := range d.tunnels {
-		ids = append(ids, id)
+	for id, e := range d.tunnels {
+		if drop(e) {
+			ids = append(ids, id)
+		}
 	}
 	d.mu.Unlock()
 	sort.Ints(ids)
 	for _, id := range ids {
-		d.closeTunnel(id, "restart")
-		log.Printf("drain: closed tunnel %d", id)
+		d.closeTunnel(id, reason)
+		log.Printf("closed tunnel %d (%s)", id, reason)
 	}
+}
+
+// pruneTunnels closes tunnels that the (re)loaded config no longer allows.
+func (d *Daemon) pruneTunnels() {
+	d.mu.Lock()
+	cfg := d.cfg
+	d.mu.Unlock()
+	d.closeTunnelsIf("config", func(e *tunnelEntry) bool {
+		h := cfg.Hosts[e.Host]
+		return h == nil || !h.Agent || h.EffectiveProfile() == policy.ProfileReadonly || !slices.Contains(h.Tunnels, e.Target)
+	})
 }
 
 func (s *Service) TunnelOpen(a *TunnelArgs, r *TunnelReply) error {
@@ -138,6 +155,10 @@ func (s *Service) TunnelOpen(a *TunnelArgs, r *TunnelReply) error {
 	}
 	if _, ok := cfg.Visible(repo)[a.Host]; !ok {
 		r.Code, r.Msg = CodeBlocked, fmt.Sprintf("host %q is not available to agents here; see 'ostiary hosts'", a.Host)
+		return nil
+	}
+	if prof := cfg.Visible(repo)[a.Host]; prof == policy.ProfileReadonly {
+		r.Code, r.Msg = CodeBlocked, fmt.Sprintf("host %q is read-only here; a tunnel could carry writes, so it is refused", a.Host)
 		return nil
 	}
 	h := cfg.Hosts[a.Host]

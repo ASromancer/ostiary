@@ -426,7 +426,7 @@ func hostFlags(fs *flag.FlagSet, h *hosts.Host) (allow, deny *multi) {
 	fs.StringVar(&h.User, "user", h.User, "remote user")
 	fs.IntVar(&h.Port, "port", h.Port, "port (default 22)")
 	fs.StringVar(&h.Key, "key", h.Key, "name of the key in the vault")
-	fs.StringVar(&h.Profile, "profile", h.Profile, "readonly|standard|full")
+	fs.StringVar(&h.Profile, "profile", h.Profile, "readonly|strict|standard|full")
 	fs.BoolVar(&h.Agent, "agent", h.Agent, "visible to agents")
 	fs.StringVar(&h.Description, "desc", h.Description, "description shown to agents")
 	allow, deny = &multi{}, &multi{}
@@ -729,7 +729,7 @@ func doctorChecks(notify bool) []ui.Check {
 				case tg.Paired:
 					ok("Telegram: đã kết nối @" + tg.Bot)
 				default:
-					warn("Telegram: chưa ghép đôi (@" + tg.Bot + ")")
+					warn("Telegram: chưa ghép nối (@" + tg.Bot + ")")
 				}
 			}
 		}
