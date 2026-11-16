@@ -52,8 +52,17 @@ type Config struct {
 }
 
 func Load(path string) (*Config, error) {
+	b, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return LoadBytes(b, path)
+}
+
+// LoadBytes parses hosts.toml content already read (name is for errors); nil is an empty config.
+func LoadBytes(b []byte, path string) (*Config, error) {
 	c := &Config{}
-	if _, err := toml.DecodeFile(path, c); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if _, err := toml.Decode(string(b), c); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	if c.Hosts == nil {

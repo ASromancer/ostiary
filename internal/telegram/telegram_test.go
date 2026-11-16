@@ -252,18 +252,10 @@ func TestPairingNeedsConfirm(t *testing.T) {
 	if m := e.f.find("sendMessage", 0); m == nil || !strings.Contains(m.Body["text"].(string), "Đang chờ xác nhận") {
 		t.Fatalf("%v", m)
 	}
-	// first valid candidate wins: another account with the right code is told so and changes nothing
-	e.f.push(pairMsgID(3, "private", 8, 8, "/pair 111111"))
-	if m := e.f.findWhere("sendMessage", 0, func(b map[string]any) bool { return strings.Contains(b["text"].(string), "yêu cầu ghép") }); m == nil {
-		t.Fatal("second account not told")
-	}
-	if c := e.s.Status().Candidate; c == nil || c.UserID != 7 {
-		t.Fatalf("candidate replaced: %+v", c)
-	}
-	if _, err := e.s.Confirm(8); err == nil {
+	if _, err := e.s.Confirm(8, nil); err == nil {
 		t.Fatal("confirmed an account that is not the candidate")
 	}
-	c, err := e.s.Confirm(7)
+	c, err := e.s.Confirm(7, nil)
 	if err != nil || c.ChatID != 7 {
 		t.Fatal(c, err)
 	}
@@ -276,7 +268,7 @@ func TestPairingNeedsConfirm(t *testing.T) {
 	}); m == nil {
 		t.Fatal("no confirmation message")
 	}
-	if _, err := e.s.Confirm(7); err == nil {
+	if _, err := e.s.Confirm(7, nil); err == nil {
 		t.Fatal("confirmed twice")
 	}
 }
@@ -336,7 +328,7 @@ func TestCandidateExpires(t *testing.T) {
 	e.f.push(pairMsg("private", 7, 7, "/pair 666666"))
 	until(t, "candidate", func() bool { return e.s.Status().Candidate != nil })
 	now = now.Add(11 * time.Minute)
-	if _, err := e.s.Confirm(7); err == nil || e.s.Status().Paired {
+	if _, err := e.s.Confirm(7, nil); err == nil || e.s.Status().Paired {
 		t.Fatal("confirmed after the window closed")
 	}
 }
@@ -685,5 +677,57 @@ func TestRetireStripsButtons(t *testing.T) {
 	e.s.Retire()
 	if m := e.f.find("editMessageText", 0); m == nil || !strings.Contains(m.Body["text"].(string), "ngắt kết nối") {
 		t.Fatalf("%v", m)
+	}
+}
+
+// A second, different account with the right code means the code leaked: nobody gets paired.
+func TestSecondAccountVoidsPairing(t *testing.T) {
+	var mu sync.Mutex
+	var first, second Candidate
+	e := newEnv(t, 0, 0, true)
+	e.s.o.OnPairVoid = func(a, b Candidate) { mu.Lock(); first, second = a, b; mu.Unlock() }
+	e.s.BeginPairing("777777")
+	e.f.push(pairMsgID(1, "private", 7, 7, "/pair 777777"))
+	until(t, "candidate", func() bool { return e.s.Status().Candidate != nil })
+	e.f.push(pairMsgID(2, "private", 8, 8, "/pair 777777"))
+	until(t, "void", func() bool { return !e.s.Status().Pairing })
+	st := e.s.Status()
+	if st.Paired || st.Candidate != nil || !strings.Contains(st.LastError, "hơn một tài khoản") {
+		t.Fatalf("%+v", st)
+	}
+	until(t, "callback", func() bool { mu.Lock(); defer mu.Unlock(); return first.UserID == 7 && second.UserID == 8 })
+	for _, chat := range []float64{7, 8} {
+		if m := e.f.findWhere("sendMessage", 0, func(b map[string]any) bool {
+			return b["chat_id"] == chat && strings.Contains(b["text"].(string), "đã hủy vì an toàn")
+		}); m == nil {
+			t.Fatalf("chat %v not told", chat)
+		}
+	}
+	if _, err := e.s.Confirm(7, nil); err == nil {
+		t.Fatal("confirmed after the pairing was voided")
+	}
+	// the human's own /pair afterwards gets the same message, and pairs nothing
+	e.f.push(pairMsgID(3, "private", 9, 9, "/pair 777777"))
+	if m := e.f.findWhere("sendMessage", 0, func(b map[string]any) bool {
+		return b["chat_id"] == float64(9) && strings.Contains(b["text"].(string), "đã hủy vì an toàn")
+	}); m == nil {
+		t.Fatal("late /pair not told")
+	}
+	if e.s.Status().Candidate != nil || e.s.Status().Pairing {
+		t.Fatal("state after late /pair")
+	}
+}
+
+func TestConfirmPersistFailureLeavesUnpaired(t *testing.T) {
+	e := newEnv(t, 0, 0, true)
+	e.s.BeginPairing("888888")
+	e.f.push(pairMsg("private", 7, 7, "/pair 888888"))
+	until(t, "candidate", func() bool { return e.s.Status().Candidate != nil })
+	n := e.f.count("sendMessage")
+	if _, err := e.s.Confirm(7, func(Candidate) error { return errors.New("disk full") }); err == nil {
+		t.Fatal("confirmed although persist failed")
+	}
+	if st := e.s.Status(); st.Paired || st.Candidate == nil || e.f.count("sendMessage") != n {
+		t.Fatalf("%+v", st)
 	}
 }

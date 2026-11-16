@@ -186,3 +186,34 @@ func TestForwardSurvivesDroppedClient(t *testing.T) {
 		t.Fatalf("after Drop: %q %v", buf, err)
 	}
 }
+
+// A burst of connections after a Drop shares one re-dial and all work.
+func TestForwardBurstAfterDrop(t *testing.T) {
+	p, tg := newPoolTarget(t)
+	tn, err := p.Forward(tg, echoServer(t), time.Minute, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tn.Close()
+	p.Drop(tg.Name)
+	errs := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		go func() {
+			c, err := net.Dial("tcp", tn.Addr())
+			if err != nil {
+				errs <- err
+				return
+			}
+			defer c.Close()
+			c.SetDeadline(time.Now().Add(5 * time.Second))
+			c.Write([]byte("x"))
+			_, err = io.ReadFull(c, make([]byte, 1))
+			errs <- err
+		}()
+	}
+	for i := 0; i < 8; i++ {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+}

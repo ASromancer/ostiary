@@ -50,7 +50,7 @@ func (d *Daemon) tgStart(token, bot string, chat, user int64, allow bool) (*tele
 	}
 	svc := telegram.New(telegram.Options{
 		Bot: &telegram.Bot{Token: token}, ChatID: chat, UserID: user, AllowDestructive: allow,
-		Resolve: d.tgResolve, Pending: d.q.Get,
+		Resolve: d.tgResolve, Pending: d.q.Get, OnPairVoid: d.tgPairVoid,
 	})
 	svc.SetBotName(bot)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -292,12 +292,31 @@ func (d *Daemon) telegramConfirmBegin() (*tgCand, error) {
 	return &tgCand{id: c.UserID, user: c.Username, name: c.Name, bot: st.Bot}, nil
 }
 
+// String names the account: @user (id N, name), omitting what is empty.
 func (c *tgCand) String() string {
-	who := "id " + strconv.FormatInt(c.id, 10)
-	if c.user != "" {
-		who = "@" + c.user + " (id " + strconv.FormatInt(c.id, 10) + ", " + c.name + ")"
+	id := "id " + strconv.FormatInt(c.id, 10)
+	if c.user == "" {
+		if c.name == "" {
+			return id
+		}
+		return id + " (" + c.name + ")"
 	}
-	return who
+	if c.name == "" {
+		return "@" + c.user + " (" + id + ")"
+	}
+	return "@" + c.user + " (" + id + ", " + c.name + ")"
+}
+
+// tgPairVoid records that two accounts sent the right code, so the pairing was cancelled.
+func (d *Daemon) tgPairVoid(first, second telegram.Candidate) {
+	who := func(c telegram.Candidate) string {
+		return (&tgCand{id: c.UserID, user: c.Username, name: c.Name}).String()
+	}
+	d.log.Write(audit.Entry{Kind: "admin", Cmd: "telegram-pair-cancelled", Decision: "denied",
+		Note: fmt.Sprintf("two Telegram accounts sent the pairing code: %s and %s", who(first), who(second))})
+	if d.q.Notify != nil {
+		_ = d.q.Notify(approval.Notice{Title: "Ostiary", Body: "Ghép nối Telegram đã bị hủy: hai tài khoản gửi cùng một mã (" + who(first) + ", " + who(second) + "). Hãy ghép lại trên máy."})
+	}
 }
 
 // telegramConfirm stores the chat and user ids of the account the human approved.
@@ -306,21 +325,23 @@ func (d *Daemon) telegramConfirm(c *tgCand, r *AdminReply) error {
 	if svc == nil {
 		return errors.New("chưa có yêu cầu ghép nối Telegram nào")
 	}
-	cand, err := svc.Confirm(c.id)
+	cand, err := svc.Confirm(c.id, func(cand telegram.Candidate) error { // saves first: paired only if stored
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		if d.data == nil {
+			return errors.New("vault is locked; run 'ostiary unlock' first")
+		}
+		d.data.Settings[setTGChat], d.data.Settings[setTGUser] = strconv.FormatInt(cand.ChatID, 10), strconv.FormatInt(cand.UserID, 10)
+		d.data.Settings[setTGUser+"name"] = cand.Username
+		if err := d.saveVault(); err != nil {
+			delete(d.data.Settings, setTGChat)
+			delete(d.data.Settings, setTGUser)
+			delete(d.data.Settings, setTGUser+"name")
+			return err
+		}
+		return nil
+	})
 	if err != nil {
-		return err
-	}
-	d.mu.Lock()
-	if d.data == nil {
-		d.mu.Unlock()
-		return errors.New("vault is locked; run 'ostiary unlock' first")
-	}
-	d.data.Settings[setTGChat], d.data.Settings[setTGUser] = strconv.FormatInt(cand.ChatID, 10), strconv.FormatInt(cand.UserID, 10)
-	d.data.Settings[setTGUser+"name"] = cand.Username
-	err = d.saveVault()
-	d.mu.Unlock()
-	if err != nil {
-		svc.SetError(err)
 		return err
 	}
 	who := (&tgCand{id: cand.UserID, user: cand.Username, name: cand.Name}).String()

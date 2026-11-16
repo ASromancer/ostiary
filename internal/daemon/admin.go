@@ -125,6 +125,13 @@ func (s *Service) Begin(a *BeginArgs, r *BeginReply) error {
 		detail = a.Name + " " + fp
 		data = key
 	}
+	if a.Op == "reload" {
+		h := a.Hash
+		if h == "" {
+			h = ConfigHash()
+		}
+		data = &reloadTicket{hash: h}
+	}
 	if a.Op == "telegram-confirm" {
 		c, err := s.d.telegramConfirmBegin()
 		if err != nil {
@@ -144,6 +151,9 @@ func (s *Service) Begin(a *BeginArgs, r *BeginReply) error {
 	r.OSAuth = s.d.osAuth()
 	return nil
 }
+
+// reloadTicket binds a reload to the config the human reviewed.
+type reloadTicket struct{ hash string }
 
 func (s *Service) Admin(a *AdminArgs, r *AdminReply) error {
 	d := s.d
@@ -177,6 +187,7 @@ func (s *Service) Admin(a *AdminArgs, r *AdminReply) error {
 		return err
 	}
 	d.log.Write(e)
+	d.pruneTunnels() // host-set/host-rm/key-rm may have taken away what a tunnel relies on
 	return nil
 }
 
@@ -228,6 +239,8 @@ func (d *Daemon) adminMessage(a *AdminArgs, data any) string {
 
 func (d *Daemon) admin(a *AdminArgs, data any, r *AdminReply) error {
 	var authNow error
+	var hb, rb []byte // reload: the bytes that were verified, loaded and approved
+	var approvedHash string
 	switch a.Op {
 	case "init":
 		key, salt := vault.NewKey(), []byte(nil)
@@ -282,7 +295,13 @@ func (d *Daemon) admin(a *AdminArgs, data any, r *AdminReply) error {
 		return nil
 	}
 	if a.Op == "reload" {
-		if err := d.loadConfig(); err != nil {
+		tk, _ := data.(*reloadTicket)
+		hb, rb = readOnce(paths.Hosts()), readOnce(paths.Rules())
+		approvedHash = HashConfigBytes(hb, rb)
+		if tk == nil || tk.hash != approvedHash {
+			return errors.New("cấu hình đã thay đổi sau khi bạn xem — hãy xem lại")
+		}
+		if err := d.loadConfigBytes(hb, rb); err != nil {
 			return err
 		}
 		authNow = d.reloadAuth()
@@ -309,8 +328,8 @@ func (d *Daemon) admin(a *AdminArgs, data any, r *AdminReply) error {
 	}
 	switch a.Op {
 	case "reload":
-		d.data.ConfigHash = ConfigHash()
-		saveApproved()
+		d.data.ConfigHash = approvedHash
+		saveApprovedBytes(hb, rb)
 		d.userOnly = false
 		r.Out = fmt.Sprintf("reloaded %d hosts; approvals use OS authentication", len(d.cfg.Hosts))
 		if err := d.authProblem(); err != nil {

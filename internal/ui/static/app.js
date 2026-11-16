@@ -800,9 +800,11 @@ function diffNode(text) {
   });
   return pre;
 }
+let reloadHash = ""; // hash of the config files the diff was built from: the reload approves exactly these
 async function configDiffNodes() {
   let files;
-  try { files = await call("GET", "/api/config/diff"); } catch (e) { return []; }
+  reloadHash = "";
+  try { const d = await call("GET", "/api/config/diff"); files = d.files; reloadHash = d.hash || ""; } catch (e) { return []; }
   const box = el("div", "cfgdiff");
   files.forEach((f) => {
     const sec = el("div", "cfgfile");
@@ -850,7 +852,7 @@ async function admin(op, name, extra) {
   // The Telegram bot token travels at begin (the daemon shows the bot name for the human to confirm) and never in commit.
   const { beginPass, ...rest } = extra || {};
   extra = rest;
-  const b = await call("POST", "/api/admin/begin", beginPass ? { op, name, pass: beginPass } : { op, name });
+  const b = await call("POST", "/api/admin/begin", beginPass ? { op, name, pass: beginPass } : op === "reload" ? { op, name, hash: reloadHash } : { op, name });
   let code = "";
   if (op === "trust" && b.Info) {
     if (!(await confirmTrust(name, b.Info))) return null;
@@ -1416,20 +1418,11 @@ async function loadTelegram() {
   box.replaceChildren(...tgNodes(t));
   tickPair();
 }
-// The pairing code lives in this tab's sessionStorage only (a reload keeps it).
-const TG_KEY = "ostiary-tgpair";
-function tgRemember(out) {
-  const m = /^@(\S+) (\d+)$/.exec(out || "");
-  if (m) try { sessionStorage.setItem(TG_KEY, JSON.stringify({ bot: m[1], code: m[2] })); } catch (e) { /* ignore */ }
-}
-function tgForget() { try { sessionStorage.removeItem(TG_KEY); } catch (e) { /* ignore */ } }
-function tgCodeFor(t) {
-  try {
-    const v = JSON.parse(sessionStorage.getItem(TG_KEY) || "null");
-    if (v && v.bot === (t.Bot || "").replace(/^@/, "") && /^\d+$/.test(v.code)) return v.code;
-  } catch (e) { /* ignore */ }
-  return "";
-}
+// The pairing code lives only in this variable: not in storage (it would sit on disk), and a reload loses it.
+let tgCode = null;
+const tgRemember = (out) => { const m = /^@(\S+) (\d+)$/.exec(out || ""); if (m) tgCode = { bot: m[1], code: m[2] }; };
+const tgForget = () => { tgCode = null; };
+const tgCodeFor = (t) => (tgCode && tgCode.bot === (t.Bot || "").replace(/^@/, "") ? tgCode.code : "");
 function tickPair() {
   document.querySelectorAll(".tgleft").forEach((n) => {
     const s = Math.max(0, Math.round((n._until - Date.now()) / 1000));
@@ -1478,9 +1471,9 @@ function tgNodes(t) {
     // The code never comes from the server (agents can read it there): only this tab remembers it.
     const code = tgCodeFor(t);
     if (t.CandID) {
-      const who = (t.CandUser ? "@" + t.CandUser : "id " + t.CandID) + " (id " + t.CandID + (t.CandName ? ", " + t.CandName : "") + ")";
-      out.push(el("div", "tgcand", "Xác nhận tài khoản " + who + "?"),
-        el("p", "hint", "Chỉ xác nhận nếu đây đúng là tài khoản Telegram của bạn. Tài khoản này sẽ duyệt được yêu cầu của agent."));
+      out.push(el("div", "tgcand", "Tài khoản " + (t.CandUser ? "@" + t.CandUser + " " : "") + "(id " + t.CandID + ") muốn ghép — có phải tài khoản của bạn?"));
+      if (t.CandName) out.push(el("p", "hint", "Tên hiển thị: " + t.CandName + " (do người dùng tự đặt, không đáng tin)"));
+      out.push(el("p", "hint", "Chỉ xác nhận nếu username và id đúng là của bạn. Tài khoản này sẽ duyệt được yêu cầu của agent."));
       const yes = button("Xác nhận ghép nối", "primary");
       yes.addEventListener("click", () => busy(yes, async () => {
         const o = await admin("telegram-confirm", "");
@@ -1499,7 +1492,18 @@ function tgNodes(t) {
       out.push(how);
       tickPair();
     } else {
-      out.push(el("p", "hint", "Mã ghép nối chỉ hiện trên tab đã bắt đầu. Nếu mất mã, hãy ngắt kết nối và bắt đầu lại."));
+      out.push(el("p", "hint", "Mã ghép nối không còn hiển thị sau khi tải lại trang. Hãy hủy và bắt đầu lại."));
+    }
+    {
+      const un = button("Hủy ghép nối", "danger");
+      un.addEventListener("click", () => busy(un, async () => {
+        const o = await admin("telegram-unpair", "");
+        if (o) { tgForget(); ok(o); }
+        loadTelegram().catch(fail);
+      }));
+      const act2 = el("div", "tgact");
+      act2.appendChild(un);
+      out.push(act2);
     }
     out.push(privacy);
     if (err) out.push(err);

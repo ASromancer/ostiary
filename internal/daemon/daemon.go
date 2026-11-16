@@ -217,11 +217,22 @@ func (d *Daemon) confirm(msg string) error {
 }
 
 func (d *Daemon) loadConfig() error {
-	cfg, err := hosts.Load(paths.Hosts())
+	return d.loadConfigBytes(readOnce(paths.Hosts()), readOnce(paths.Rules()))
+}
+
+// readOnce returns the file's bytes, nil when it cannot be read.
+func readOnce(p string) []byte {
+	b, _ := os.ReadFile(p)
+	return b
+}
+
+// loadConfigBytes installs the config parsed from bytes the caller already read (and verified).
+func (d *Daemon) loadConfigBytes(hb, rb []byte) error {
+	cfg, err := hosts.LoadBytes(hb, paths.Hosts())
 	if err != nil {
 		return err
 	}
-	eng, err := policy.Load(paths.Rules())
+	eng, err := policy.LoadBytes(rb, paths.Rules())
 	if err != nil {
 		return err
 	}
@@ -235,12 +246,16 @@ func (d *Daemon) loadConfig() error {
 // ConfigHash fingerprints hosts.toml and rules.toml.
 func ConfigHash() string { return HashConfigFiles(paths.Hosts(), paths.Rules()) }
 
-// HashConfigFiles is ConfigHash over two files; only their base names count.
+// HashConfigFiles is ConfigHash over two files (a missing file hashes as empty).
 func HashConfigFiles(hosts, rules string) string {
+	return HashConfigBytes(readOnce(hosts), readOnce(rules))
+}
+
+// HashConfigBytes hashes the contents of hosts.toml and rules.toml.
+func HashConfigBytes(hosts, rules []byte) string {
 	h := sha256.New()
-	for _, p := range []string{hosts, rules} {
-		b, _ := os.ReadFile(p)
-		fmt.Fprintf(h, "%s\x00%d\x00", filepath.Base(p), len(b))
+	for i, b := range [][]byte{hosts, rules} {
+		fmt.Fprintf(h, "%s\x00%d\x00", [2]string{"hosts.toml", "rules.toml"}[i], len(b))
 		h.Write(b)
 	}
 	return hex.EncodeToString(h.Sum(nil))
@@ -248,16 +263,19 @@ func HashConfigFiles(hosts, rules string) string {
 
 // saveApproved keeps a copy of hosts.toml and rules.toml as last approved
 // (0600), for the reload diff. A missing source removes its copy.
-func saveApproved() {
+func saveApproved() { saveApprovedBytes(readOnce(paths.Hosts()), readOnce(paths.Rules())) }
+
+// saveApprovedBytes stores the given contents as the approved copies; nil removes a copy.
+func saveApprovedBytes(hb, rb []byte) {
 	dir := paths.Approved()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		log.Printf("approved config copy: %v", err)
 		return
 	}
-	for _, p := range []string{paths.Hosts(), paths.Rules()} {
+	for i, p := range []string{paths.Hosts(), paths.Rules()} {
 		dst := filepath.Join(dir, filepath.Base(p))
-		b, err := os.ReadFile(p)
-		if err != nil {
+		b := [][]byte{hb, rb}[i]
+		if b == nil {
 			os.Remove(dst)
 			continue
 		}

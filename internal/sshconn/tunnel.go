@@ -32,6 +32,7 @@ type Tunnel struct {
 	active  map[net.Conn]struct{}
 	closed  bool
 	slots   chan struct{} // limits concurrent connections
+	dialMu  sync.Mutex    // one re-dial at a time: concurrent connections share the new client
 }
 
 // Closed reports whether Close has begun.
@@ -108,7 +109,9 @@ func (p *Pool) Forward(tg Target, remote string, ttl time.Duration, onClose func
 					t.mu.Unlock()
 					<-t.slots
 				}()
+				t.dialMu.Lock()
 				c, err := p.client(tg) // per connection: re-dials if the pooled client was dropped
+				t.dialMu.Unlock()
 				if err != nil {
 					return
 				}

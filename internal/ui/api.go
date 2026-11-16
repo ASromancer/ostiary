@@ -84,13 +84,16 @@ func (s *Server) routes(mux *http.ServeMux) {
 		writeJSON(w, h)
 	})
 	mux.HandleFunc("POST /api/admin/begin", func(w http.ResponseWriter, r *http.Request) {
-		var in struct{ Op, Name, Pass string }
+		var in struct{ Op, Name, Pass, Hash string }
 		if !readJSON(w, r, &in) {
 			return
 		}
 		a := daemon.BeginArgs{Op: in.Op, Name: in.Name}
 		if in.Op == "telegram-pair" { // the bot token, for this op only
 			a.Pass = []byte(in.Pass)
+		}
+		if in.Op == "reload" { // the hash of the files whose diff the human saw
+			a.Hash = in.Hash
 		}
 		rep, err := b.Begin(a)
 		if err != nil {
@@ -203,26 +206,35 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/config/diff", func(w http.ResponseWriter, r *http.Request) {
 		type fileDiff struct {
 			Name     string `json:"name"`
-			Approved bool   `json:"approved"` // a last-approved copy exists
+			Approved bool   `json:"approved"` // a verified last-approved copy exists
 			Diff     string `json:"diff"`
 			Error    string `json:"error,omitempty"`
 		}
-		out := []fileDiff{}
+		// Every file is read exactly once: the bytes that are verified are the bytes that are diffed,
+		// and the hash of the current bytes goes to the reload ticket so only what was shown gets approved.
+		read := func(p string) ([]byte, bool) { b, err := os.ReadFile(p); return b, err == nil }
+		curH, _ := read(s.opt.HostsFile)
+		curR, _ := read(s.opt.RulesFile)
+		oldH, okH := read(filepath.Join(s.opt.ApprovedDir, "hosts.toml"))
+		oldR, okR := read(filepath.Join(s.opt.ApprovedDir, "rules.toml"))
 		// The copies are plain files an agent can write: they only count when they match what the vault approved.
 		want, _ := b.ApprovedHash()
-		verified := want != "" && want == daemon.HashConfigFiles(filepath.Join(s.opt.ApprovedDir, "hosts.toml"), filepath.Join(s.opt.ApprovedDir, "rules.toml"))
-		for _, f := range []struct{ name, cur string }{{"hosts.toml", s.opt.HostsFile}, {"rules.toml", s.opt.RulesFile}} {
-			cur, _ := os.ReadFile(f.cur)
-			old, err := os.ReadFile(filepath.Join(s.opt.ApprovedDir, f.name))
-			d := fileDiff{Name: f.name, Approved: err == nil}
-			if err == nil && !verified {
+		verified := want != "" && want == daemon.HashConfigBytes(oldH, oldR)
+		out := []fileDiff{}
+		for _, f := range []struct {
+			name     string
+			old, cur []byte
+			ok       bool
+		}{{"hosts.toml", oldH, curH, okH}, {"rules.toml", oldR, curR, okR}} {
+			d := fileDiff{Name: f.name, Approved: f.ok}
+			if f.ok && !verified {
 				d.Approved, d.Error = false, "không xác minh được bản đã duyệt — xem file trực tiếp"
-			} else if err == nil {
-				d.Diff = unifiedDiff(string(old), string(cur))
+			} else if f.ok {
+				d.Diff = unifiedDiff(string(f.old), string(f.cur))
 			}
 			out = append(out, d)
 		}
-		writeJSON(w, out)
+		writeJSON(w, map[string]any{"files": out, "hash": daemon.HashConfigBytes(curH, curR)})
 	})
 	mux.HandleFunc("GET /api/setup", func(w http.ResponseWriter, r *http.Request) {
 		rep, err := b.Setup()

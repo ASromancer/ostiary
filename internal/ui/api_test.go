@@ -317,13 +317,20 @@ func TestAPIConfigDiff(t *testing.T) {
 	fb := &fakeBackend{hash: daemon.HashConfigFiles(filepath.Join(appr, "hosts.toml"), filepath.Join(appr, "rules.toml"))}
 	s := newServer(Options{Backend: fb, HostsFile: hosts, RulesFile: rules, ApprovedDir: appr}, 8123)
 	w := api(t, s, "GET", "/api/config/diff", "")
-	var got []struct {
-		Name     string
-		Approved bool
-		Diff     string
+	var env struct {
+		Hash  string
+		Files []struct {
+			Name     string
+			Approved bool
+			Diff     string
+		}
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || len(got) != 2 {
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil || len(env.Files) != 2 {
 		t.Fatalf("%v %s", err, w.Body.String())
+	}
+	got := env.Files
+	if env.Hash != daemon.HashConfigFiles(hosts, rules) {
+		t.Fatalf("hash %q is not the hash of the diffed files", env.Hash)
 	}
 	if !got[0].Approved || got[0].Diff != "@@ -1,2 +1,3 @@\n a\n+b\n c\n" {
 		t.Fatalf("hosts: %+v", got[0])
@@ -334,12 +341,16 @@ func TestAPIConfigDiff(t *testing.T) {
 	// A copy that does not match the vault's hash (an agent wrote it) gives no diff, only a warning.
 	os.WriteFile(filepath.Join(appr, "hosts.toml"), []byte("a\nb\nc\n"), 0o600)
 	w = api(t, s, "GET", "/api/config/diff", "")
-	var bad []struct {
-		Approved    bool
-		Diff, Error string
+	var badEnv struct {
+		Files []struct {
+			Approved    bool
+			Diff, Error string
+		}
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &bad); err != nil || bad[0].Approved || bad[0].Diff != "" || !strings.Contains(bad[0].Error, "không xác minh được") {
-		t.Fatalf("tampered copy: %v %s", err, w.Body.String())
+	json.Unmarshal(w.Body.Bytes(), &badEnv)
+	bad := badEnv.Files
+	if len(bad) != 2 || bad[0].Approved || bad[0].Diff != "" || !strings.Contains(bad[0].Error, "không xác minh được") {
+		t.Fatalf("tampered copy: %s", w.Body.String())
 	}
 }
 
@@ -375,5 +386,15 @@ func TestAPISummary(t *testing.T) {
 	if got.Today["allow"] != 2 || got.Today["blocked"] != 1 || got.Today["approved"] != 0 ||
 		got.LastBlocked == nil || got.LastBlocked.Cmd != "rm -rf /" || got.Tunnels != 2 || got.Telegram != "paired" {
 		t.Fatalf("%s", w.Body.String())
+	}
+}
+
+func TestAPIReloadBeginCarriesReviewedHash(t *testing.T) {
+	f := &fakeBackend{}
+	s := newServer(Options{Backend: f}, 8123)
+	api(t, s, "POST", "/api/admin/begin", `{"op":"reload","name":"","hash":"abc123"}`)
+	api(t, s, "POST", "/api/admin/begin", `{"op":"host-set","name":"x","hash":"evil"}`)
+	if len(f.begun) != 2 || f.begun[0].Hash != "abc123" || f.begun[1].Hash != "" {
+		t.Fatalf("%+v", f.begun)
 	}
 }

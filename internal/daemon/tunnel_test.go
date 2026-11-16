@@ -241,3 +241,77 @@ func TestTunnelRefusedOnReadonlyHost(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 }
+
+// Reload approves the files that were reviewed: swapping one between Begin and the commit is refused.
+func TestReloadBoundToReviewedConfig(t *testing.T) {
+	h := unlocked(t)
+	hash := ConfigHash() // what the human reviewed
+	var br BeginReply
+	h.call("Begin", &BeginArgs{Op: "reload", Hash: hash}, &br)
+	b, _ := os.ReadFile(paths.Hosts())
+	os.WriteFile(paths.Hosts(), append(b, []byte("\n# swapped after review\n")...), 0o600)
+	var ar AdminReply
+	err := h.call("Admin", &AdminArgs{Ticket: br.Ticket, Code: h.lastCode(), Op: "reload"}, &ar)
+	if err == nil || !strings.Contains(err.Error(), "đã thay đổi sau khi bạn xem") {
+		t.Fatalf("%v", err)
+	}
+	h.d.mu.Lock()
+	same := h.d.data.ConfigHash == hash
+	h.d.mu.Unlock()
+	if !same {
+		t.Fatal("vault baseline changed by a refused reload")
+	}
+	// without a supplied hash (CLI) Begin pins the files as they are then
+	h.call("Begin", &BeginArgs{Op: "reload"}, &br)
+	b, _ = os.ReadFile(paths.Hosts())
+	os.WriteFile(paths.Hosts(), append(b, []byte("# again\n")...), 0o600)
+	if err := h.call("Admin", &AdminArgs{Ticket: br.Ticket, Code: h.lastCode(), Op: "reload"}, &ar); err == nil {
+		t.Fatal("reload approved files that changed after Begin")
+	}
+	// unchanged files are approved and become the vault baseline
+	h.call("Begin", &BeginArgs{Op: "reload"}, &br)
+	if err := h.call("Admin", &AdminArgs{Ticket: br.Ticket, Code: h.lastCode(), Op: "reload"}, &ar); err != nil {
+		t.Fatal(err)
+	}
+	h.d.mu.Lock()
+	defer h.d.mu.Unlock()
+	if h.d.data.ConfigHash != ConfigHash() {
+		t.Fatal("baseline is not the approved bytes")
+	}
+}
+
+// host-set that changes the address closes the tunnel (its connection was made for the old target).
+func TestHostSetPrunesTunnels(t *testing.T) {
+	target := echo(t)
+	h := tunnelHarness(t, target)
+	r := openTunnel(t, h, target)
+	h.d.mu.Lock()
+	cur := *h.d.cfg.Hosts["web1"]
+	h.d.mu.Unlock()
+	cur.Port = 2299
+	var br BeginReply
+	h.call("Begin", &BeginArgs{Op: "reload"}, &br) // approve the harness's tunnels edit first
+	if err := h.call("Admin", &AdminArgs{Ticket: br.Ticket, Code: h.lastCode(), Op: "reload"}, &AdminReply{}); err != nil {
+		t.Fatal(err)
+	}
+	h.call("Begin", &BeginArgs{Op: "host-set", Name: "web1"}, &br)
+	if err := h.call("Admin", &AdminArgs{Ticket: br.Ticket, Code: h.lastCode(), Op: "host-set", Name: "web1", Host: &cur}, &AdminReply{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := net.DialTimeout("tcp", r.Local, time.Second); err == nil {
+		t.Fatal("tunnel still open after its host changed")
+	}
+}
+
+func TestTgCandString(t *testing.T) {
+	for c, want := range map[tgCand]string{
+		{id: 7, user: "a", name: "Al"}: "@a (id 7, Al)",
+		{id: 7, user: "a"}:             "@a (id 7)",
+		{id: 7, name: "Al"}:            "id 7 (Al)",
+		{id: 7}:                        "id 7",
+	} {
+		if got := c.String(); got != want {
+			t.Errorf("%q want %q", got, want)
+		}
+	}
+}

@@ -53,6 +53,8 @@ type tunnelEntry struct {
 	TunnelInfo
 	t      *sshconn.Tunnel
 	reason atomic.Value // string: why it closed (default "ttl")
+	cwd    string       // the agent's directory: its repo may cap the profile
+	sig    string       // hostSig at open
 }
 
 func fmtTTL(d time.Duration) string {
@@ -122,15 +124,43 @@ func (d *Daemon) closeTunnelsIf(reason string, drop func(*tunnelEntry) bool) {
 	}
 }
 
-// pruneTunnels closes tunnels that the (re)loaded config no longer allows.
+// hostSig identifies what a tunnel's SSH connection depends on.
+func hostSig(h *hosts.Host) string { return fmt.Sprintf("%s|%d|%s|%s", h.Host, h.Port, h.User, h.Key) }
+
+// pruneTunnels closes tunnels that the config or vault no longer allows: the host
+// is gone, its address, user or key changed, the target left the allow-list, agent
+// access is off, the effective profile (with the repo cap) is readonly, or the key was removed.
 func (d *Daemon) pruneTunnels() {
 	d.mu.Lock()
 	cfg := d.cfg
+	var es []*tunnelEntry
+	for _, e := range d.tunnels {
+		es = append(es, e)
+	}
+	keys := map[string]bool{}
+	if d.data != nil {
+		for k := range d.data.Keys {
+			keys[k] = true
+		}
+		for k := range d.data.Passwords {
+			keys[k] = true
+		}
+	}
+	haveVault := d.data != nil
 	d.mu.Unlock()
-	d.closeTunnelsIf("config", func(e *tunnelEntry) bool {
+	for _, e := range es {
 		h := cfg.Hosts[e.Host]
-		return h == nil || !h.Agent || h.EffectiveProfile() == policy.ProfileReadonly || !slices.Contains(h.Tunnels, e.Target)
-	})
+		bad := h == nil || hostSig(h) != e.sig || !slices.Contains(h.Tunnels, e.Target) || (haveVault && h.Key != "" && !keys[h.Key])
+		if !bad {
+			repo, err := hosts.FindRepo(e.cwd)
+			prof, ok := cfg.Visible(repo)[e.Host]
+			bad = err != nil || !ok || prof == policy.ProfileReadonly
+		}
+		if bad {
+			d.closeTunnel(e.ID, "config")
+			log.Printf("closed tunnel %d (config)", e.ID)
+		}
+	}
 }
 
 func (s *Service) TunnelOpen(a *TunnelArgs, r *TunnelReply) error {
@@ -242,7 +272,7 @@ func (s *Service) TunnelOpen(a *TunnelArgs, r *TunnelReply) error {
 	}
 	t, err := d.target(a.Host, h)
 	if err == nil {
-		te := &tunnelEntry{TunnelInfo: TunnelInfo{ID: id, Host: a.Host, Target: a.Target, Agent: a.Agent, Until: time.Now().Add(ttl)}}
+		te := &tunnelEntry{TunnelInfo: TunnelInfo{ID: id, Host: a.Host, Target: a.Target, Agent: a.Agent, Until: time.Now().Add(ttl)}, cwd: a.Cwd, sig: hostSig(h)}
 		te.t, err = d.pool.Forward(t, a.Target, ttl, func(st sshconn.Stats) {
 			d.mu.Lock()
 			delete(d.tunnels, id)

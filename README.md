@@ -197,7 +197,7 @@ The daemon finds this file by walking up from the agent's working directory. It 
 
 The daemon reads `hosts.toml` and `rules.toml` only at startup and on `ostiary reload` (which you confirm like any admin operation). If the files changed on disk since you last approved them, the daemon refuses every agent request until you run `ostiary reload`.
 
-Each approved `host-set`, `host-rm`, `reload` and `init` also saves a copy of both files in `~/.local/state/ostiary/approved/` (mode 0600). The UI's "Đọc lại cấu hình" confirm shows what changed since that copy, as a coloured diff, before you approve it.
+Each approved `host-set`, `host-rm`, `reload` and `init` also saves a copy of both files in `~/.local/state/ostiary/approved/` (mode 0600). The UI's "Đọc lại cấu hình" confirm shows what changed since that copy, as a coloured diff, before you approve it. The copy only counts if it matches the hash in the vault (otherwise no diff is shown), and the reload approves exactly the files that were diffed: if either file changes between the diff and your approval, the reload is refused and you review again.
 
 ## Approvals
 
@@ -229,9 +229,9 @@ When the agent runs something destructive:
 
 Approve agent requests from your phone. Set up (UI, Kho khóa → Telegram; each step is an approved admin operation):
 
-1. Create a bot with @BotFather and paste its token. The daemon checks it with `getMe` and shows `@<bot>` and a 6-digit pairing code. The code is returned only to the tab that started pairing (it survives a reload of that tab) and is never in any status reply, so an agent cannot read it.
+1. Create a bot with @BotFather and paste its token. The daemon checks it with `getMe` and shows `@<bot>` and a 6-digit pairing code. The daemon returns the code only in the reply to that approved operation, never in a status; the UI keeps it in memory only (a reload loses it: cancel and start again). Treat it as visible to anything that can see your screen, so the confirmation step is the real protection.
 2. Send `/pair <code>` to the bot from a private chat. The code is valid for 10 minutes and allows 10 wrong attempts. The bot answers "Đang chờ xác nhận trên máy…".
-3. In the UI, confirm the account ("Xác nhận tài khoản @user (id, tên)?"). This is a second approved admin operation (`telegram-confirm`) whose dialog names the Telegram account and the bot. Only then does the daemon store your chat and user id, and the bot answers "Đã kết nối…". The first account to send a valid code is the candidate; later ones are told a request is already waiting. Knowing the code is not enough to pair.
+3. In the UI, confirm the account ("Xác nhận tài khoản @user (id, tên)?"). This is a second approved admin operation (`telegram-confirm`) whose dialog names the Telegram account and the bot. Only then does the daemon store your chat and user id, and the bot answers "Đã kết nối…". The first account to send a valid code is the candidate. If a second, different account sends the code too, the whole pairing is cancelled ("Có hơn một tài khoản gửi mã ghép — đã hủy vì an toàn"), both chats are told, and you get a desktop notification and an audit entry. Knowing the code is not enough to pair.
 
 New requests arrive as a message with the command in a monospace block and buttons: "Duyệt 1 lần", "30 phút" (not for destructive commands or tunnels) and "Từ chối". The message is edited when the request is decided, here or on the machine. A button press counts only from the paired user in the paired chat, with the request's one-time nonce, while the request is still pending; the audit log records it as `auth=telegram`. Admin operations (keys, hosts, upgrade, pairing) can never be approved from Telegram. "Cho phép duyệt lệnh phá hủy qua Telegram" (on by default) also covers tunnels; when off, those messages are informational with no buttons.
 

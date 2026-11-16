@@ -20,6 +20,7 @@ type fakeBackend struct {
 	skipped *bool
 	tunnels []daemon.TunnelInfo
 	closed  []int
+	begun   []daemon.BeginArgs
 	hash    string // the vault's approved config hash
 }
 
@@ -47,6 +48,9 @@ func (f *fakeBackend) HostList() (daemon.HostListReply, error) {
 		Trusted: map[string]bool{"web1": true}}, nil
 }
 func (f *fakeBackend) Begin(a daemon.BeginArgs) (daemon.BeginReply, error) {
+	f.mu.Lock()
+	f.begun = append(f.begun, a)
+	f.mu.Unlock()
 	return daemon.BeginReply{Ticket: 77, OSAuth: true, Info: "info:" + a.Op + ":" + string(a.Pass)}, nil
 }
 func (f *fakeBackend) Admin(a daemon.AdminArgs) (daemon.AdminReply, error) {

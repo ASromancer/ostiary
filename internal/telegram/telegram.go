@@ -50,6 +50,8 @@ func ValidToken(s string) (string, error) {
 	return s, nil
 }
 
+const voidMsg = "Có hơn một tài khoản gửi mã ghép — đã hủy vì an toàn. Hãy ghép lại trên máy."
+
 var errConn = errors.New("không kết nối được tới Telegram")
 
 // Bot is a minimal Bot API client. Base is empty except in tests.
@@ -207,6 +209,8 @@ type Options struct {
 	Resolve func(id int, choice string, user int64) error
 	// Pending returns a request that is still undecided.
 	Pending func(id int) (approval.Request, bool)
+	// OnPairVoid is called when two different accounts sent the right code: the pairing is cancelled.
+	OnPairVoid func(first, second Candidate)
 	// OnPairCode returns a new pairing code; nil means a random 6 digits.
 	OnPairCode func() string
 }
@@ -262,8 +266,10 @@ type Service struct {
 	allow    bool
 	sent     map[int]*sent
 	pair     *Pairing
-	pollErr  string // long-poll health: cleared by the next good poll
-	lastErr  string // pairing, send and edit failures: kept until a send or pairing succeeds
+	voidCode string    // the cancelled pairing's code: the human's own /pair gets the same message
+	voidTill time.Time // until that pairing's window would have ended
+	pollErr  string    // long-poll health: cleared by the next good poll
+	lastErr  string    // pairing, send and edit failures: kept until a send or pairing succeeds
 	pollFail int
 	userName string
 	botName  string
@@ -372,8 +378,10 @@ func (s *Service) PairCode() string {
 }
 
 // Confirm pairs the candidate whose Telegram user id is user, once the human
-// approved it on the computer. It tells the account in Telegram.
-func (s *Service) Confirm(user int64) (Candidate, error) {
+// approved it on the computer. persist stores the ids (it runs first, under
+// the service lock: it must not call back into the service); only if it
+// succeeds is the service paired and the account told.
+func (s *Service) Confirm(user int64, persist func(Candidate) error) (Candidate, error) {
 	s.mu.Lock()
 	s.expireLocked()
 	p := s.pair
@@ -382,6 +390,12 @@ func (s *Service) Confirm(user int64) (Candidate, error) {
 		return Candidate{}, errors.New("không còn yêu cầu ghép nối nào để xác nhận")
 	}
 	c := *p.cand
+	if persist != nil {
+		if err := persist(c); err != nil {
+			s.mu.Unlock()
+			return Candidate{}, err
+		}
+	}
 	s.pair = nil
 	s.chat, s.user, s.userName = c.ChatID, c.UserID, c.Username
 	s.lastErr = ""
@@ -450,6 +464,11 @@ func (s *Service) message(ctx context.Context, m *Message) {
 	s.mu.Lock()
 	s.expireLocked()
 	p := s.pair
+	if p == nil && s.voidCode != "" && s.Now().Before(s.voidTill) && subtle.ConstantTimeCompare([]byte(code), []byte(s.voidCode)) == 1 {
+		s.mu.Unlock() // the human's own /pair after a cancel: same message
+		_, _ = s.o.Bot.send(ctx, m.Chat.ID, voidMsg, "", nil)
+		return
+	}
 	if p == nil || m.Date < p.start.Unix() { // no pairing, or old backlog
 		s.mu.Unlock()
 		return
@@ -457,9 +476,24 @@ func (s *Service) message(ctx context.Context, m *Message) {
 	var reply string
 	switch {
 	case subtle.ConstantTimeCompare([]byte(code), []byte(p.code)) == 1:
-		if p.cand != nil {
-			reply = "Đã có yêu cầu ghép nối đang chờ xác nhận."
+		if p.cand != nil && p.cand.UserID == m.From.ID {
+			reply = "Đang chờ xác nhận trên máy…"
 			break
+		}
+		if p.cand != nil { // a second account knows the code: it has leaked, so nobody gets paired
+			first := *p.cand
+			s.voidCode, s.voidTill = p.code, p.expires
+			s.pair = nil
+			s.lastErr = "Telegram: có hơn một tài khoản gửi mã ghép — đã hủy vì an toàn"
+			s.mu.Unlock()
+			second := Candidate{UserID: m.From.ID, ChatID: m.Chat.ID, Username: field(m.From.Username, maxField),
+				Name: field(strings.TrimSpace(m.From.FirstName+" "+m.From.LastName), maxField)}
+			if s.o.OnPairVoid != nil {
+				s.o.OnPairVoid(first, second)
+			}
+			_, _ = s.o.Bot.send(ctx, first.ChatID, voidMsg, "", nil)
+			_, _ = s.o.Bot.send(ctx, m.Chat.ID, voidMsg, "", nil)
+			return
 		}
 		name := field(strings.TrimSpace(m.From.FirstName+" "+m.From.LastName), maxField)
 		p.cand = &Candidate{UserID: m.From.ID, ChatID: m.Chat.ID, Username: field(m.From.Username, maxField), Name: name}

@@ -115,6 +115,7 @@ type DecideArgs struct {
 type BeginArgs struct {
 	Op, Name string
 	Pass     []byte // telegram-pair only: the bot token (never logged, shown or put in a notification)
+	Hash     string // reload only: ConfigHash of the files the human reviewed ("" = the files as they are now)
 }
 
 type BeginReply struct {
