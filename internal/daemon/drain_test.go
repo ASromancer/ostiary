@@ -65,7 +65,22 @@ func TestDrainCancelsPendingApproval(t *testing.T) {
 
 func TestDrainForceAndTwice(t *testing.T) {
 	h := unlocked(t)
-	go h.call("Exec", &ExecArgs{Env: Env{Cwd: h.tmp, Agent: AgentClaude}, Kind: "run", Host: "web1", Cmd: "sleep 3"}, &ExecReply{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.call("Exec", &ExecArgs{Env: Env{Cwd: h.tmp, Agent: AgentClaude}, Kind: "run", Host: "web1", Cmd: "sleep 3"}, &ExecReply{})
+	}()
+	// The forced drain does not wait for the command, but the test must: on
+	// Windows its open output file would block the temp-dir cleanup.
+	t.Cleanup(func() {
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+		}
+		for i := 0; i < 50 && runningCommands(h.d) > 0; i++ {
+			time.Sleep(100 * time.Millisecond)
+		}
+	})
 	for i := 0; i < 100; i++ {
 		if c, _, _ := h.d.runningCounts(); c == 1 {
 			break
@@ -104,3 +119,5 @@ func TestDrainCancelsRequestAddedWhileDraining(t *testing.T) {
 		t.Fatalf("%+v %v %v", dec, done, ok)
 	}
 }
+
+func runningCommands(d *Daemon) int { c, _, _ := d.runningCounts(); return c }
