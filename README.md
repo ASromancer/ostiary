@@ -54,6 +54,8 @@ Before anything is installed, the signature over `SHA256SUMS` is verified agains
 
 Set `OSTIARY_NO_UPDATE_CHECK=1` in the daemon's environment to turn off the background check.
 
+Stop, restart and upgrade drain first: new commands get exit 103, running commands get up to 60 s to finish, pending approvals are cancelled (the agent sees a 101 with a restart message), then jobs are killed. `ostiary stop --now` (and "Cập nhật luôn" in the UI) skips the wait (on Windows the installer upgrade always stops the daemon with the normal wait); SIGTERM and SIGINT drain too (a second signal skips the wait). The UI asks first when something is running.
+
 A vault in passphrase mode needs unlocking again after the restart. The web UI session is lost on restart: reopen Ostiary from its icon or with `ostiary open`. On macOS, run `ostiary install-service` once after updating from 0.2.0 so launchd keeps `ostiary stop` stopped. After an in-place macOS upgrade Finder's Get Info may still show the old version (cosmetic).
 
 ## Moving from agentssh
@@ -78,6 +80,7 @@ ostiary out <id> [--grep <regexp>] [--range a:b]
 ostiary get <host>:<remote-path> <local-path>
 ostiary put <local-path> <host>:<remote-path>
 ostiary job start <host> "<cmd>" | job tail <id> [--lines N] | job kill <id>
+ostiary tunnel open <host> <host:port> [--ttl 1h] | tunnel list | tunnel close <id>
 ostiary explain "<cmd>" [--host <host>]
 ```
 
@@ -88,15 +91,37 @@ Filesystem      Size  Used Avail Use% Mounted on
 /dev/sda1        80G   41G   36G  54% /
 ```
 
-An ostiary run passes the remote command's exit code through unchanged. ostiary uses three exit codes of its own:
+An ostiary run passes the remote command's exit code through unchanged. ostiary uses four exit codes of its own:
 
 | Code | Meaning |
 |---|---|
 | 100 | blocked by policy (forbidden, profile doesn't allow it, host not allowed) |
 | 101 | denied by the user or the approval timed out (default 120 s) |
 | 102 | daemon not running or vault locked |
+| 103 | ostiary is restarting (stop, upgrade): wait about 10 s and retry; the CLI retries once itself, so if it still fails (a drain can take up to 60 s) wait and retry again |
 
-If ostiary itself produced the exit code, it also prints a stderr line starting with `ostiary:`. If the remote command happens to exit with 100–102, no such line appears.
+If ostiary itself produced the exit code, it also prints a stderr line starting with `ostiary:`. If the remote command happens to exit with 100–103, no such line appears.
+
+## Tunnels
+
+A tunnel forwards a port on `127.0.0.1` to a `host:port` as seen from the SSH server, so an agent can reach a database or internal service that is not exposed. Allow-list the targets per host in `hosts.toml`:
+
+```toml
+[hosts.db1]
+tunnels = ["127.0.0.1:5432", "db.internal:3306"]
+```
+
+```text
+$ ostiary tunnel open db1 127.0.0.1:5432 --ttl 30m
+tunnel 7 127.0.0.1:41873 -> 127.0.0.1:5432 via db1 until 15:42
+```
+
+- Opening a tunnel always needs your approval (OS dialog, code, the UI, or Telegram when "destructive approvals over Telegram" is on), at level `destructive`; there is no 30-minute option. A target that is not in `tunnels` is refused with exit code 100 before any approval is asked.
+- The default lifetime is 1 hour, the maximum 8 hours. A tunnel closes on `ostiary tunnel close <id>`, when the TTL ends, when the daemon stops or restarts, when the vault is locked, or when a config reload no longer allows it (host or target removed, agent access off, or the host is `readonly`). A host whose effective profile is `readonly` (including a repo `max_profile`) refuses tunnels with exit code 100, because a tunnel can carry writes. The audit log records the open and the close (reason, bytes in and out, connections). MCP has `tunnel_open`, `tunnel_list` and `tunnel_close`.
+- The TTL minimum is 1 minute. Each tunnel forwards at most 32 connections at once; dialing the target times out after 10 s. Any agent can list and close any tunnel (`tunnel list` is not scoped to its repo).
+- In the web UI, the Host page lists open tunnels (local port with a copy button, time left, traffic) with a confirmed "Đóng" button, and the host drawer has a "Cho phép tunnel tới" field for the allow-list. Tunnel approval cards have their own icon and no 30-minute option.
+- Known limit: while a tunnel is open, any local process of any user can connect to its loopback port. The TTL keeps that window short.
+- A tunnel is a network path only. Ostiary does not handle database passwords; the agent still needs credentials, and we recommend a read-only database user.
 
 ## Agents
 
@@ -139,8 +164,11 @@ Agents that have a shell work better with the CLI and skill: no tool schemas sit
 | Profile | read | mutate | destructive | forbidden |
 |---|---|---|---|---|
 | `readonly` | run | block | block | block |
+| `strict` | run | approval via daemon, for every agent | approval via daemon | block |
 | `standard` (default) | run | agent hook asks you | approval via daemon | block |
 | `full` | run | run | approval via daemon | block |
+
+Only one daemon runs per user: it holds an exclusive lock on `state/daemon.lock`, and a second `ostiary daemon` exits with "daemon already running".
 
 Per host in `~/.config/ostiary/hosts.toml`:
 
@@ -169,6 +197,8 @@ The daemon finds this file by walking up from the agent's working directory. It 
 
 The daemon reads `hosts.toml` and `rules.toml` only at startup and on `ostiary reload` (which you confirm like any admin operation). If the files changed on disk since you last approved them, the daemon refuses every agent request until you run `ostiary reload`.
 
+Each approved `host-set`, `host-rm`, `reload` and `init` also saves a copy of both files in `~/.local/state/ostiary/approved/` (mode 0600). The UI's "Đọc lại cấu hình" confirm shows what changed since that copy, as a coloured diff, before you approve it. The copy only counts if it matches the hash in the vault (otherwise no diff is shown), and the reload approves exactly the files that were diffed: if either file changes between the diff and your approval, the reload is refused and you review again.
+
 ## Approvals
 
 Approvals and admin operations (key generation, host edits, ...) are confirmed through your operating system's authentication dialog, opened by the daemon itself:
@@ -195,14 +225,28 @@ When the agent runs something destructive:
 
 **Fallback: codes.** Without OS authentication (turned off, no local graphical session, polkit action missing or installed for another user), the notification carries a 4-character code that you type after choosing. Three wrong codes deny the request. A daemon that started in OS mode never switches to codes by itself (see above). `ostiary doctor` shows which mode is active.
 
+## Telegram approvals
+
+Approve agent requests from your phone. Set up (UI, Kho khóa → Telegram; each step is an approved admin operation):
+
+1. Create a bot with @BotFather and paste its token. The daemon checks it with `getMe` and shows `@<bot>` and a 6-digit pairing code. The daemon returns the code only in the reply to that approved operation, never in a status; the UI keeps it in memory only (a reload loses it: cancel and start again). Treat it as visible to anything that can see your screen, so the confirmation step is the real protection.
+2. Send `/pair <code>` to the bot from a private chat. The code is valid for 10 minutes and allows 10 wrong attempts. The bot answers "Đang chờ xác nhận trên máy…".
+3. In the UI, confirm the account ("Xác nhận tài khoản @user (id, tên)?"). This is a second approved admin operation (`telegram-confirm`) whose dialog names the Telegram account and the bot. Only then does the daemon store your chat and user id, and the bot answers "Đã kết nối…". The first account to send a valid code is the candidate. If a second, different account sends the code too, the whole pairing is cancelled ("Có hơn một tài khoản gửi mã ghép — đã hủy vì an toàn"), both chats are told, and you get a desktop notification and an audit entry. Knowing the code is not enough to pair.
+
+New requests arrive as a message with the command in a monospace block and buttons: "Duyệt 1 lần", "30 phút" (not for destructive commands or tunnels) and "Từ chối". The message is edited when the request is decided, here or on the machine. A button press counts only from the paired user in the paired chat, with the request's one-time nonce, while the request is still pending; the audit log records it as `auth=telegram`. Admin operations (keys, hosts, upgrade, pairing) can never be approved from Telegram. "Cho phép duyệt lệnh phá hủy qua Telegram" (on by default) also covers tunnels; when off, those messages are informational with no buttons.
+
+The token is stored only in the encrypted vault (never logged or audited); unpairing deletes it. The approval dialog names the bot (`@<bot>`) you are connecting, and pairing writes an audit entry with the Telegram account (id and username) and shows a desktop notification. Downgrading to v0.2 drops the Telegram settings from the vault (pair again after upgrading), and v0.2 rejects `profile = "strict"` in `hosts.toml` and `max_profile = "strict"` in a repo cap as an unknown profile: change them before downgrading. A command that is too long to show in full gets only a "Từ chối" button. The daemon talks only to `https://api.telegram.org`, with a 60 s long poll and backoff; `ostiary doctor` shows `Telegram: đã kết nối @<bot>` or the error. The command text, host and agent name pass through Telegram's servers.
+
+**Threat note:** whoever controls the paired Telegram account can approve requests. Protect it with Telegram two-step verification and a passcode, and turn off destructive approval over Telegram if you do not need it.
+
 ## GUI
 
 The daemon serves a local page on `127.0.0.1` with a random port. Open it with `ostiary ui` or from the tray icon. Clicking an approval notification (Linux, Windows) opens it at that request.
 
-- **Duyệt:** pending requests with the exact command (risky parts highlighted), approve once, approve 30 minutes, deny, or deny with a message. Approving shows the OS authentication dialog, as in the terminal.
-- **Host:** add, edit, delete, trust a host key, reload the config.
+- **Duyệt:** pending requests with the exact command (risky parts highlighted), approve once, approve 30 minutes, deny, or deny with a message. Approving shows the OS authentication dialog, as in the terminal. On screens 860 px and wider, a strip on top shows today's commands by decision, open tunnels, the Telegram state and the last blocked command.
+- **Host:** add, edit, delete, trust a host key, reload the config (after showing the diff against the last approved copy).
 - **Vault & key:** lock and unlock; generate, import and delete keys. Private keys are never shown; exporting stays in the terminal (`ostiary key export`).
-- **Nhật ký & trạng thái:** the `doctor` checks and the audit log, with each command's full output.
+- **Nhật ký & trạng thái:** the `doctor` checks and the audit log, with each command's full output. "Theo phiên" (default) groups consecutive entries of the same agent and project (repo, else working directory), less than 30 minutes apart, into collapsible sessions with the time range, command count and denied/approved badges; "Danh sách" is the flat table. The choice is remembered in the browser.
 
 Login links are single use (10 minutes): `ostiary ui` asks the daemon for one over its socket (`ostiary ui --print` prints it), and the tray and notifications mint their own. The page then keeps a session cookie that expires after 8 hours idle. It refuses other hosts and cross-origin requests. In OS-auth mode, approving and admin changes go through the OS dialog; in code mode they need the approval code, and deny and lock need neither. Clickable notifications exist only in OS-auth mode. Flags: `ostiary daemon --no-ui`, `--no-tray`, `--ui-port N`. On GNOME the tray icon needs the AppIndicator extension (preinstalled on Ubuntu).
 
@@ -245,6 +289,7 @@ Locations on Linux and macOS (see the Windows section above for Windows):
 | `~/.config/ostiary/vault.bin` | keys, encrypted with nacl/secretbox |
 | `~/.config/ostiary/known_hosts` | pinned host keys |
 | `~/.local/state/ostiary/audit.jsonl` | audit log (no command output) |
+| `~/.local/state/ostiary/approved/` | copies of `hosts.toml` and `rules.toml` as last approved (for the reload diff) |
 | `~/.local/state/ostiary/out/<id>` | full output, deleted after 7 days |
 
 Background jobs live in the daemon and are lost if it restarts. Their output stays in `out/`.

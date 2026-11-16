@@ -58,3 +58,26 @@ func TestCreateNeverReplaces(t *testing.T) {
 		t.Fatalf("original vault damaged: %v", err)
 	}
 }
+
+func TestSettingsOptionalForOldVaults(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "v.bin")
+	k := NewKey()
+	if err := Save(p, k, nil, &Data{Keys: map[string][]byte{"a": []byte("K")}}); err != nil { // no settings: the v0.2 shape
+		t.Fatal(err)
+	}
+	d, err := Open(p, k)
+	if err != nil || d.Settings == nil || string(d.Keys["a"]) != "K" {
+		t.Fatalf("%+v %v", d, err)
+	}
+	d.Settings["telegram-token"] = "t"
+	if err := Save(p, k, nil, d); err != nil {
+		t.Fatal(err)
+	}
+	if d, err = Open(p, k); err != nil || d.Settings["telegram-token"] != "t" {
+		t.Fatalf("%+v %v", d, err)
+	}
+	d.Wipe()
+	if len(d.Settings) != 0 {
+		t.Fatal("wipe left settings")
+	}
+}

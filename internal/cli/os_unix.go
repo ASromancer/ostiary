@@ -47,7 +47,7 @@ func startDetached(logPath string, extra []string) error {
 // is fixed at start, and OS authentication needs the session's display.
 func systemdUnit(exe string) string {
 	return fmt.Sprintf("[Unit]\nDescription=ostiary daemon\nAfter=graphical-session.target\nPartOf=graphical-session.target\n\n"+
-		"[Service]\nExecStart=%s daemon\nRestart=on-failure\n\n"+
+		"[Service]\nExecStart=%s daemon\nRestart=on-failure\nTimeoutStopSec=75\n\n"+
 		"[Install]\nWantedBy=graphical-session.target\n", exe)
 }
 

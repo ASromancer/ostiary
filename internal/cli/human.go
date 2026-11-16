@@ -59,6 +59,13 @@ func cmdDaemon(args []string) int {
 		}
 		log.SetOutput(f)
 	}
+	var wait time.Duration
+	if *afterPid != 0 {
+		wait = 70 * time.Second // the old daemon drains (up to 60 s) before it lets go of the lock
+	}
+	if err := daemon.AcquireLock(wait); err != nil {
+		return errf(1, "%v", err)
+	}
 	if *afterPid != 0 {
 		daemon.WaitForPredecessor()
 	}
@@ -100,6 +107,7 @@ func cmdDaemon(args []string) int {
 		srv, err = ui.Start(ui.Options{
 			Backend: ui.ServiceBackend{S: svc}, Port: *uiPort, Version: Version,
 			AuditFile: paths.Audit(), KnownHostsFile: paths.KnownHosts(),
+			HostsFile: paths.Hosts(), RulesFile: paths.Rules(), ApprovedDir: paths.Approved(),
 			Doctor: func() []ui.Check { return doctorChecks(false) },
 		})
 		if err != nil {
@@ -418,7 +426,7 @@ func hostFlags(fs *flag.FlagSet, h *hosts.Host) (allow, deny *multi) {
 	fs.StringVar(&h.User, "user", h.User, "remote user")
 	fs.IntVar(&h.Port, "port", h.Port, "port (default 22)")
 	fs.StringVar(&h.Key, "key", h.Key, "name of the key in the vault")
-	fs.StringVar(&h.Profile, "profile", h.Profile, "readonly|standard|full")
+	fs.StringVar(&h.Profile, "profile", h.Profile, "readonly|strict|standard|full")
 	fs.BoolVar(&h.Agent, "agent", h.Agent, "visible to agents")
 	fs.StringVar(&h.Description, "desc", h.Description, "description shown to agents")
 	allow, deny = &multi{}, &multi{}
@@ -712,6 +720,17 @@ func doctorChecks(notify bool) []ui.Check {
 				ok("approvals use OS authentication")
 			} else {
 				warn("approvals use codes from desktop notifications (" + st.AuthNote + ")")
+			}
+			var tg daemon.TelegramReply
+			if err := c.Call("A.TelegramStatus", &daemon.Empty{}, &tg); err == nil && tg.Configured {
+				switch {
+				case tg.LastError != "":
+					warn("Telegram: không kết nối được (" + tg.LastError + ")")
+				case tg.Paired:
+					ok("Telegram: đã kết nối @" + tg.Bot)
+				default:
+					warn("Telegram: chưa ghép nối (@" + tg.Bot + ")")
+				}
 			}
 		}
 		c.Close()

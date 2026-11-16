@@ -28,6 +28,8 @@ type Host struct {
 	Description string   `toml:"description,omitempty" json:"description,omitempty"`
 	Allow       []string `toml:"allow,omitempty" json:"allow,omitempty"`
 	Deny        []string `toml:"deny,omitempty" json:"deny,omitempty"`
+	// Tunnels is the allow-list of host:port targets, as seen from the SSH server, an agent may ask to forward.
+	Tunnels []string `toml:"tunnels,omitempty" json:"tunnels,omitempty"`
 }
 
 func (h *Host) Addr() string {
@@ -50,8 +52,17 @@ type Config struct {
 }
 
 func Load(path string) (*Config, error) {
+	b, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return LoadBytes(b, path)
+}
+
+// LoadBytes parses hosts.toml content already read (name is for errors); nil is an empty config.
+func LoadBytes(b []byte, path string) (*Config, error) {
 	c := &Config{}
-	if _, err := toml.DecodeFile(path, c); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if _, err := toml.Decode(string(b), c); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	if c.Hosts == nil {
@@ -70,9 +81,27 @@ func (h *Host) Validate() error {
 		return errors.New("missing host")
 	}
 	if h.Profile != "" && !policy.ValidProfile(h.Profile) {
-		return fmt.Errorf("unknown profile %q (readonly|standard|full)", h.Profile)
+		return fmt.Errorf("unknown profile %q (readonly|strict|standard|full)", h.Profile)
+	}
+	for i, t := range h.Tunnels {
+		n, err := NormalizeTarget(t)
+		if err != nil {
+			return err
+		}
+		h.Tunnels[i] = n
 	}
 	return nil
+}
+
+// NormalizeTarget trims a tunnel target and lowercases its host. It must be host:port, port 1-65535, no spaces.
+func NormalizeTarget(t string) (string, error) {
+	t = strings.TrimSpace(t)
+	host, port, err := net.SplitHostPort(t)
+	n, perr := strconv.Atoi(port)
+	if err != nil || host == "" || perr != nil || n < 1 || n > 65535 || strings.ContainsAny(t, " \t\r\n") {
+		return "", fmt.Errorf("bad tunnel target %q (want host:port, port 1-65535)", t)
+	}
+	return net.JoinHostPort(strings.ToLower(host), strconv.Itoa(n)), nil
 }
 
 func (c *Config) Save(path string) error {

@@ -35,6 +35,9 @@ type Options struct {
 	Version        string
 	AuditFile      string // audit.jsonl to read for the log tab
 	KnownHostsFile string // known_hosts to list (read-only) in the known-hosts tab
+	HostsFile      string // live config and the daemon's last-approved copies, for the reload diff
+	RulesFile      string
+	ApprovedDir    string
 }
 
 type Server struct {

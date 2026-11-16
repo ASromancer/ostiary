@@ -26,13 +26,14 @@ For agents:
   ostiary get <host>:<remote-path> <local-path>
   ostiary put <local-path> <host>:<remote-path>
   ostiary job start <host> "<cmd>" | job tail <id> [--lines N] | job kill <id>
+  ostiary tunnel open <host> <host:port> [--ttl 1h] | tunnel list | tunnel close <id>
   ostiary explain "<cmd>" [--host <host>]
   ostiary mcp [--cwd <dir>]          stdio MCP server with the same tools
 
 For the human user (need a real terminal; approvals and admin commands are confirmed
 in an OS authentication dialog, or with a code from a desktop notification as a fallback):
   ostiary open                       open the Ostiary app (starts the daemon if needed)
-  ostiary stop                       stop the daemon
+  ostiary stop [--now]               stop the daemon (waits up to 60 s for running commands; --now does not wait)
   ostiary upgrade [--check] [--yes]  install the latest release (--check: exit 10 if one exists)
   ostiary init [--passphrase] | unlock | lock | approve | reload | doctor | ui | daemon | install-polkit | install-service | uninstall-service
   ostiary host add|edit|ls|rm|trust ...
@@ -41,7 +42,8 @@ in an OS authentication dialog, or with a code from a desktop notification as a 
   ostiary install-hooks claude|codex|gemini|antigravity|all
 
 Exit codes: the remote command's own code, or
-  100 blocked by policy, 101 denied / approval timed out, 102 daemon not running or vault locked.
+  100 blocked by policy, 101 denied / approval timed out, 102 daemon not running or vault locked,
+  103 ostiary is restarting (wait ~10 s, retry once).
 Only errors produced by ostiary itself print a stderr line starting with "ostiary:".
 `
 
@@ -56,9 +58,10 @@ func init() {
 }
 
 var guidance = map[int]string{
-	daemon.CodeBlocked:  "blocked by policy: do not retry another way; tell the user what you wanted to do",
-	daemon.CodeDenied:   "stop and ask the user; do not retry another way",
-	daemon.CodeNoDaemon: "if you run in a sandbox (e.g. Codex), it may block ostiary's local socket: re-run this ostiary command outside the sandbox first; otherwise ask the user to start or unlock ostiary",
+	daemon.CodeBlocked:    "blocked by policy: do not retry another way; tell the user what you wanted to do",
+	daemon.CodeDenied:     "stop and ask the user; do not retry another way",
+	daemon.CodeRestarting: "ostiary is restarting; wait about 10 seconds and retry the same command once; if it fails again ask the user",
+	daemon.CodeNoDaemon:   "if you run in a sandbox (e.g. Codex), it may block ostiary's local socket: re-run this ostiary command outside the sandbox first; otherwise ask the user to start or unlock ostiary",
 }
 
 // Main runs a subcommand and returns the process exit code.
@@ -73,7 +76,7 @@ func Main(args []string) int {
 	cleanOldBinaries()
 	cmds := map[string]func([]string) int{
 		"hosts": cmdHosts, "run": cmdRun, "out": cmdOut, "get": cmdGet, "put": cmdPut,
-		"job": cmdJob, "explain": cmdExplain, "hook": cmdHook,
+		"job": cmdJob, "tunnel": cmdTunnel, "explain": cmdExplain, "hook": cmdHook,
 		"init": cmdInit, "unlock": cmdUnlock, "lock": cmdLock, "approve": cmdApprove,
 		"reload": cmdReload, "host": cmdHost, "key": cmdKey, "log": cmdLog, "doctor": cmdDoctor, "ui": cmdUI,
 		"install-hooks": cmdInstallHooks, "daemon": cmdDaemon, "install-polkit": cmdInstallPolkit, "install-service": cmdInstallService, "uninstall-service": cmdUninstallService, "mcp": cmdMCP, "open": cmdOpen, "stop": cmdStop, "upgrade": cmdUpgrade,

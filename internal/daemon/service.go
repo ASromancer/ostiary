@@ -104,6 +104,10 @@ func reasonSummary(res policy.Result) string {
 
 func (s *Service) Exec(a *ExecArgs, r *ExecReply) error {
 	d := s.d
+	if a.ApprovalID == 0 && d.isDraining() {
+		r.Code, r.Msg = CodeRestarting, restartingMsg
+		return nil
+	}
 	cfg, eng, locked, userOnly := d.snapshot()
 	switch {
 	case locked:
@@ -169,6 +173,11 @@ func (s *Service) Exec(a *ExecArgs, r *ExecReply) error {
 	case policy.Approve:
 		switch {
 		case a.ApprovalID != 0:
+			// check the id belongs to this request before WaitFor consumes the decision
+			if p, ok := d.q.Peek(a.ApprovalID); !ok || p.Host != a.Host || p.Cmd != display || p.Kind != a.Kind {
+				r.Code, r.Msg = CodeDenied, "unknown or expired approval request; stop and ask the user"
+				return nil
+			}
 			req, dec, done, ok := d.q.WaitFor(a.ApprovalID, a.WaitMax)
 			if ok && !done && req.Host == a.Host && req.Cmd == display && req.Kind == a.Kind {
 				r.Pending, r.ID = a.ApprovalID, a.ApprovalID // still waiting for the human
@@ -183,9 +192,15 @@ func (s *Service) Exec(a *ExecArgs, r *ExecReply) error {
 			e.Auth = dec.Auth
 			if !dec.OK {
 				e.Decision, e.Note = dec.Outcome, dec.Message
+				if dec.Outcome == "restart" {
+					e.Decision, e.Note = "cancelled", "restart"
+				}
 				d.log.Write(e)
 				r.Code, r.ID = CodeDenied, id
 				r.Msg = fmt.Sprintf("request #%d %s; stop and ask the user, do not retry another way", id, dec.Outcome)
+				if dec.Outcome == "restart" {
+					r.Msg = fmt.Sprintf("request #%d was cancelled because ostiary restarted; ask the user before retrying", id)
+				}
 				if dec.Message != "" {
 					r.Msg += ". User says: " + dec.Message
 				}
@@ -199,6 +214,7 @@ func (s *Service) Exec(a *ExecArgs, r *ExecReply) error {
 			id = newID()
 			d.q.Add(approval.Request{ID: id, Time: time.Now(), Host: a.Host, User: h.User, Cwd: a.Cwd,
 				Repo: repoDir, Agent: a.Agent, Kind: a.Kind, Cmd: display, Level: r.Level, Reasons: res.Reasons})
+			d.cancelIfDraining()
 			r.Pending, r.ID = id, id
 			return nil
 		}
@@ -218,8 +234,17 @@ func (s *Service) Exec(a *ExecArgs, r *ExecReply) error {
 		r.Code, r.Msg = CodeBlocked, err.Error()
 		return nil
 	}
+	if !d.beginCmd() {
+		if e.Decision == "approved" {
+			e.Decision, e.Note = "cancelled", "restart"
+			d.log.Write(e)
+		}
+		r.Code, r.Msg = CodeRestarting, restartingMsg
+		return nil
+	}
 	start := time.Now()
 	exit, n, err := d.execute(a, t, id, &e)
+	d.endCmd()
 	e.Exit, e.Bytes, e.DurationMs = &exit, n, time.Since(start).Milliseconds()
 	if err != nil {
 		e.Note = strings.TrimSpace(e.Note + " " + err.Error())
@@ -486,6 +511,7 @@ func (s *Service) Status(_ *Empty, r *StatusReply) error {
 	r.VaultMissing = err != nil
 	r.Passphrase = salt != nil
 	r.Pending = len(d.q.Pending())
+	r.Running.Commands, r.Running.Jobs, r.Running.Tunnels = d.runningCounts()
 	r.UI = d.uiBase
 	r.Auth = "code"
 	if err := d.authProblem(); err == nil {
@@ -559,15 +585,10 @@ func (s *Service) Lock(_ *Empty, _ *Empty) error {
 	return nil
 }
 
-// Shutdown stops the daemon: it replies, then closes the listener so Serve returns.
-func (s *Service) Shutdown(_ *Empty, _ *Empty) error {
+// Shutdown stops the daemon: it replies, then drains (waits for running commands unless Force).
+func (s *Service) Shutdown(a *ShutdownArgs, _ *Empty) error {
 	s.d.log.Write(audit.Entry{Kind: "admin", Cmd: "stop", Decision: "allow"})
-	s.d.mu.Lock()
-	ln := s.d.ln
-	s.d.mu.Unlock()
-	if ln != nil {
-		go func() { time.Sleep(100 * time.Millisecond); ln.Close() }() // let the reply go out first
-	}
+	go func() { time.Sleep(100 * time.Millisecond); s.d.Drain(context.Background(), a.Force) }() // let the reply go out first
 	return nil
 }
 

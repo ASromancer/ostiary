@@ -73,6 +73,60 @@ class UI:
         return status
 
 
+class FakeTelegram(http.server.BaseHTTPRequestHandler):
+    """A fake Telegram Bot API: scripted updates in, every call recorded."""
+    token = "111111:E2EtokenE2EtokenE2EtokenE2Etoken12"
+    lock = threading.Lock()
+    updates, calls, next_msg = [], [], [500]
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        body = json.loads(self.rfile.read(n) or b"{}")
+        m = self.path.split("/")[-1]
+        if not self.path.startswith(f"/bot{self.token}/"):
+            return self.reply({"ok": False, "description": "Unauthorized"})
+        with self.lock:
+            self.calls.append((m, body))
+            res = True
+            if m == "getMe":
+                res = {"id": 1, "username": "e2e_bot"}
+            elif m == "sendMessage":
+                self.next_msg[0] += 1
+                res = {"message_id": self.next_msg[0]}
+                body["_id"] = self.next_msg[0]
+            elif m == "getUpdates":
+                res, self.updates[:] = list(self.updates), []
+        if m == "getUpdates" and not res:
+            time.sleep(0.2)
+        self.reply({"ok": True, "result": res})
+
+    def reply(self, obj):
+        b = json.dumps(obj).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+    def log_message(self, *a):
+        pass
+
+    @classmethod
+    def find(cls, method, pred=lambda b: True, timeout=15):
+        end = time.time() + timeout
+        while time.time() < end:
+            with cls.lock:
+                for m, b in cls.calls:
+                    if m == method and pred(b):
+                        return b
+            time.sleep(0.1)
+        raise AssertionError(f"no {method} call; calls: {[m for m, _ in cls.calls]}")
+
+    @classmethod
+    def push(cls, u):
+        with cls.lock:
+            cls.updates.append(u)
+
+
 passed = 0
 
 
@@ -371,6 +425,58 @@ def main():
         rc, out, _ = run("job", "tail", jid)
         check("running" not in out, "job kill", out)
 
+        # Approved port tunnel to a local echo server, as seen from sshd.
+        echo = socket.socket()
+        echo.bind(("127.0.0.1", 0))
+        echo.listen(5)
+        eaddr = f"127.0.0.1:{echo.getsockname()[1]}"
+
+        def echo_loop():
+            while True:
+                try:
+                    c, _ = echo.accept()
+                except OSError:
+                    return
+                def pump(c=c):
+                    while (b := c.recv(4096)):
+                        c.sendall(b)
+                    c.close()
+                threading.Thread(target=pump, daemon=True).start()
+
+        threading.Thread(target=echo_loop, daemon=True).start()
+        hp = f"{HOME}/.config/ostiary/hosts.toml"
+        cfg_text = open(hp).read()
+        open(hp, "w").write(cfg_text.replace("[hosts.e2e]\n", f'[hosts.e2e]\ntunnels = ["{eaddr}"]\n', 1))
+        rc, out = admin("reload")
+        check(rc == 0, "reload with tunnels", out)
+        rc, _, err = run("tunnel", "open", "e2e", "127.0.0.1:9")
+        check(rc == 100 and "not an allowed tunnel target" in err, "tunnel to an unlisted target is blocked", err)
+        agent = subprocess.Popen([BIN, "tunnel", "open", "e2e", eaddr, "--ttl", "5m"], env=ENV, stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        t = Tty("approve")
+        t.expect(r"DESTRUCTIVE")
+        t.expect(r"mở tunnel tới " + re.escape(eaddr))
+        code = last_code()
+        t.expect(r"\[y\] once")
+        t.send("y")
+        t.expect(r"approval code \(from the desktop notification\): ")
+        t.send(code)
+        t.expect("approved once")
+        out, err = agent.communicate(timeout=30)
+        mt = re.match(r"tunnel (\d+) (127\.0\.0\.1):(\d+) -> " + re.escape(eaddr) + r" via e2e until \d\d:\d\d\n", out)
+        check(agent.returncode == 0 and mt, "tunnel open after approval", out + err)
+        t.p.kill()
+        c = socket.create_connection(("127.0.0.1", int(mt.group(3))), 5)
+        c.sendall(b"tunnel-ping")
+        check(c.recv(64) == b"tunnel-ping", "echo through the tunnel")
+        rc, out, _ = run("tunnel", "list")
+        check(rc == 0 and f"tunnel {mt.group(1)} " in out, "tunnel list", out)
+        rc, out, _ = run("tunnel", "close", mt.group(1))
+        c.settimeout(5)
+        check(rc == 0 and c.recv(64) == b"", "tunnel close drops connections", out)
+        c.close()
+        echo.close()
+
         rc, out, _ = run("explain", "ls; sudo rm -rf /var/log/old", "--host", "e2e")
         check("level=destructive" in out and "action=approve" in out, "explain", out)
 
@@ -401,7 +507,7 @@ def main():
             return r["content"][0]["text"], r["isError"]
         init = rpc(1, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "e2e", "version": "0"}})
         mcp.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
-        check(init["result"]["serverInfo"]["name"] == "ostiary" and len(rpc(2, "tools/list")["result"]["tools"]) == 9,
+        check(init["result"]["serverInfo"]["name"] == "ostiary" and len(rpc(2, "tools/list")["result"]["tools"]) == 12,
               "mcp initialize + tools/list")
         text, err = tool(3, "run", host="e2e", command="echo via-mcp")
         check(not err and "level=read" in text and "via-mcp" in text, "mcp run read", text)
@@ -435,6 +541,7 @@ def main():
         # Config edited behind the daemon's back.
         with open(f"{HOME}/.config/ostiary/hosts.toml", "a") as f:
             f.write('\n[hosts.sneaky]\nhost = "1.2.3.4"\nagent = true\n')
+            f.write('\n[hosts.strictbox]\nhost = "1.2.3.5"\nagent = true\nprofile = "strict"\n')
         run("lock")
         t = Tty("unlock")
         t.expect("vault passphrase: ")
@@ -445,6 +552,10 @@ def main():
         rc, out = admin("reload")
         rc2, _, _ = run("run", "e2e", "echo hi")
         check(rc == 0 and rc2 == 0, "reload with code accepts the config again", out)
+        rc, out, _ = run("explain", "touch /tmp/x", "--host", "strictbox")
+        rc2, out2, _ = run("explain", "touch /tmp/x", "--host", "e2e")
+        check("level=mutate" in out and "action=approve" in out and "action=ask" in out2,
+              "strict profile: mutate needs approval (standard only asks)", out + out2)
 
         t = Tty("key", "export", "e2e")
         t.expect(r"approval code \(from the desktop notification\): ")
@@ -461,6 +572,9 @@ def main():
         # OS mode, with the fake dialog of the e2efake build.
         os.kill(daemon_pid, signal.SIGTERM)
         time.sleep(0.5)
+        tg = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeTelegram)
+        threading.Thread(target=tg.serve_forever, daemon=True).start()
+        ENV["OSTIARY_E2E_TELEGRAM_URL"] = f"http://127.0.0.1:{tg.server_port}"
         gate = os.path.join(TMP, "humanok")
         open(gate, "w").write("deny")
         ENV["OSTIARY_E2E_HUMANOK"] = gate
@@ -506,6 +620,53 @@ def main():
         check(st == 200 and f"rm {victimui}" in body, "UI shows the audit log", body)
         notes = open(NOTES).read()
         check(f"#req={rid}" in notes, "approval notification links to the UI request", notes[-300:])
+        # Telegram: pair through the UI admin path, then approve a request from a callback.
+        open(gate, "w").write("allow")
+        st, _, body = ui.req("POST", "/api/admin/begin", {"Op": "telegram-pair", "Name": "", "Pass": " " + FakeTelegram.token + "\n"})
+        tk = json.loads(body).get("Ticket")
+        check(json.loads(body).get("Info") == "@e2e_bot", "telegram-pair Begin names the bot for the approval", body)
+        st2, _, body = ui.req("POST", "/api/admin/commit", {"Ticket": tk, "Op": "telegram-pair", "Name": ""})
+        mt = re.match(r"@e2e_bot (\d{6})$", json.loads(body).get("out", ""))
+        check(st == 200 and st2 == 200 and mt, "telegram-pair via the UI stores the token and returns bot + code", body)
+        check(FakeTelegram.token not in open(f"{HOME}/.local/state/ostiary/audit.jsonl").read() and
+              FakeTelegram.token not in open(NOTES).read(), "the bot token is not in the audit log or notifications")
+        FakeTelegram.push({"update_id": 1, "message": {"message_id": 1, "chat": {"id": 42, "type": "private"},
+                                                       "from": {"id": 42, "username": "alice"}, "date": int(time.time()), "text": "/pair " + mt.group(1)}})
+        for _ in range(50):
+            raw = ui.req("GET", "/api/telegram")[2]
+            tgs = json.loads(raw)
+            if tgs.get("CandID"):
+                break
+            time.sleep(0.2)
+        check(tgs.get("CandID") == 42 and tgs.get("CandUser") == "alice" and not tgs.get("Paired") and mt.group(1) not in raw,
+              "a valid /pair only makes a candidate; the status never carries the code", raw)
+        FakeTelegram.find("sendMessage", lambda b: "Đang chờ xác nhận" in b.get("text", ""))
+        st, _, body = ui.req("POST", "/api/admin/begin", {"Op": "telegram-confirm", "Name": "evil"})
+        tk = json.loads(body).get("Ticket")
+        check(st == 200 and "@alice" in json.loads(body).get("Info", ""), "telegram-confirm Begin names the Telegram account", body)
+        st2, _, body = ui.req("POST", "/api/admin/commit", {"Ticket": tk, "Op": "telegram-confirm", "Name": ""})
+        tgs = json.loads(ui.req("GET", "/api/telegram")[2])
+        check(st2 == 200 and tgs.get("Paired") and tgs.get("Bot") == "e2e_bot" and "Token" not in tgs,
+              "telegram pairs after telegram-confirm", body + str(tgs))
+        FakeTelegram.find("sendMessage", lambda b: "Đã kết nối" in b.get("text", ""))
+        victimtg = os.path.join(remote, "victimtg")
+        open(victimtg, "w").write("x")
+        agent = subprocess.Popen([BIN, "run", "e2e", f"rm {victimtg}"], env=ENV, stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        msg = FakeTelegram.find("sendMessage", lambda b: "rm " in b.get("text", "") and "reply_markup" in b)
+        btns = [b for row in msg["reply_markup"]["inline_keyboard"] for b in row]
+        approve = next(b for b in btns if b["callback_data"].split(":")[1] == "y")["callback_data"]
+        rid_tg, _, nonce_tg = approve.split(":")
+        mid = {"message_id": msg["_id"], "chat": {"id": 42, "type": "private"}}
+        FakeTelegram.push({"update_id": 2, "callback_query": {"id": "bad", "from": {"id": 99}, "message": mid, "data": approve}})
+        FakeTelegram.find("answerCallbackQuery", lambda b: b["callback_query_id"] == "bad" and b["text"] == "không hợp lệ")
+        check(agent.poll() is None and os.path.exists(victimtg), "a callback from another Telegram user is ignored")
+        FakeTelegram.push({"update_id": 3, "callback_query": {"id": "good", "from": {"id": 42}, "message": mid, "data": approve}})
+        out, err = agent.communicate(timeout=30)
+        FakeTelegram.find("editMessageText", lambda b: "qua Telegram" in b.get("text", ""))
+        st, _, body = ui.req("GET", "/api/audit?host=e2e&limit=10")
+        check(agent.returncode == 0 and not os.path.exists(victimtg) and '"auth":"telegram"' in body.replace(" ", ""),
+              "approve from a Telegram callback runs the command; audit shows auth=telegram", out + err + body[-600:])
         open(gate, "w").write("deny")
         victimd = os.path.join(remote, "victimd")
         open(victimd, "w").write("x")
@@ -584,11 +745,16 @@ def main():
         rel.shutdown()
         ENV.pop("OSTIARY_E2E_RELEASES_URL")
         check(rc == 10 and "99.0.0" in out, "upgrade --check reports a newer release (exit 10)", out + err)
-        os.kill(daemon_pid, signal.SIGTERM)
+        # graceful drain: stop waits for a running command; the next run finds the daemon gone or restarting
+        agent = subprocess.Popen([BIN, "run", "e2e", "sleep 3"], env=ENV, stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        time.sleep(1)
+        rc, out, err = run("stop")
+        out2, err2 = agent.communicate(timeout=30)
+        check(rc == 0 and agent.returncode == 0, "stop drains: the running command finishes with exit 0", out + err + out2 + err2)
         daemon_pid = None
-        time.sleep(0.5)
-        rc, _, _ = run("hosts")
-        check(rc == 102 and not os.path.exists(ENV["OSTIARY_SOCKET"]), "daemon stops cleanly")
+        rc, _, err = run("hosts")
+        check(rc in (102, 103) and not os.path.exists(ENV["OSTIARY_SOCKET"]), "daemon stops cleanly", err)
         print(f"\nall {passed} checks passed")
     finally:
         if daemon_pid:

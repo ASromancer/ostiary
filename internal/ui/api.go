@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -83,9 +84,16 @@ func (s *Server) routes(mux *http.ServeMux) {
 		writeJSON(w, h)
 	})
 	mux.HandleFunc("POST /api/admin/begin", func(w http.ResponseWriter, r *http.Request) {
-		var a daemon.BeginArgs
-		if !readJSON(w, r, &a) {
+		var in struct{ Op, Name, Pass, Hash string }
+		if !readJSON(w, r, &in) {
 			return
+		}
+		a := daemon.BeginArgs{Op: in.Op, Name: in.Name}
+		if in.Op == "telegram-pair" { // the bot token, for this op only
+			a.Pass = []byte(in.Pass)
+		}
+		if in.Op == "reload" { // the hash of the files whose diff the human saw
+			a.Hash = in.Hash
 		}
 		rep, err := b.Begin(a)
 		if err != nil {
@@ -101,11 +109,12 @@ func (s *Server) routes(mux *http.ServeMux) {
 			Host                         *hosts.Host
 			Key, KeyPassphrase, Password string
 			Pass                         string
+			Force                        bool
 		}
 		if !readJSON(w, r, &a) {
 			return
 		}
-		args := daemon.AdminArgs{Ticket: a.Ticket, Code: a.Code, Op: a.Op, Name: a.Name, Host: a.Host}
+		args := daemon.AdminArgs{Ticket: a.Ticket, Code: a.Code, Op: a.Op, Name: a.Name, Host: a.Host, Force: a.Force}
 		if a.Key != "" {
 			p, err := normalizeKey([]byte(a.Key), a.KeyPassphrase, a.Name)
 			if err != nil {
@@ -126,6 +135,106 @@ func (s *Server) routes(mux *http.ServeMux) {
 			return
 		}
 		writeJSON(w, map[string]string{"out": rep.Out})
+	})
+	mux.HandleFunc("GET /api/tunnels", func(w http.ResponseWriter, r *http.Request) {
+		t, err := b.Tunnels()
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		if t == nil {
+			t = []daemon.TunnelInfo{}
+		}
+		writeJSON(w, t)
+	})
+	mux.HandleFunc("POST /api/tunnels/{id}/close", func(w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.Atoi(r.PathValue("id"))
+		if err != nil || id <= 0 {
+			fail(w, errors.New("bad id"))
+			return
+		}
+		if err := b.TunnelClose(id); err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, struct{}{})
+	})
+	mux.HandleFunc("GET /api/telegram", func(w http.ResponseWriter, r *http.Request) {
+		t, err := b.Telegram()
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, t)
+	})
+	mux.HandleFunc("GET /api/summary", func(w http.ResponseWriter, r *http.Request) {
+		midnight := time.Now()
+		midnight = time.Date(midnight.Year(), midnight.Month(), midnight.Day(), 0, 0, 0, 0, midnight.Location())
+		all, err := scanAudit(s.opt.AuditFile, func(e audit.Entry) bool {
+			return !e.Time.Before(midnight) && (e.Kind == "run" || e.Kind == "job" || e.Kind == "get" || e.Kind == "put")
+		})
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		sum := struct {
+			Today       map[string]int `json:"today"` // by decision, agent commands only
+			LastBlocked *audit.Entry   `json:"lastBlocked"`
+			Tunnels     int            `json:"tunnels"`
+			Telegram    string         `json:"telegram"` // none|pairing|paired
+		}{Today: map[string]int{}}
+		for i := range all {
+			sum.Today[all[i].Decision]++
+			if sum.LastBlocked == nil && all[i].Decision == "blocked" {
+				sum.LastBlocked = &all[i]
+			}
+		}
+		if t, err := b.Tunnels(); err == nil {
+			sum.Tunnels = len(t)
+		}
+		sum.Telegram = "none"
+		if tg, err := b.Telegram(); err == nil {
+			switch {
+			case tg.Paired:
+				sum.Telegram = "paired"
+			case tg.Pairing:
+				sum.Telegram = "pairing"
+			}
+		}
+		writeJSON(w, sum)
+	})
+	mux.HandleFunc("GET /api/config/diff", func(w http.ResponseWriter, r *http.Request) {
+		type fileDiff struct {
+			Name     string `json:"name"`
+			Approved bool   `json:"approved"` // a verified last-approved copy exists
+			Diff     string `json:"diff"`
+			Error    string `json:"error,omitempty"`
+		}
+		// Every file is read exactly once: the bytes that are verified are the bytes that are diffed,
+		// and the hash of the current bytes goes to the reload ticket so only what was shown gets approved.
+		read := func(p string) ([]byte, bool) { b, err := os.ReadFile(p); return b, err == nil }
+		curH, _ := read(s.opt.HostsFile)
+		curR, _ := read(s.opt.RulesFile)
+		oldH, okH := read(filepath.Join(s.opt.ApprovedDir, "hosts.toml"))
+		oldR, okR := read(filepath.Join(s.opt.ApprovedDir, "rules.toml"))
+		// The copies are plain files an agent can write: they only count when they match what the vault approved.
+		want, _ := b.ApprovedHash()
+		verified := want != "" && want == daemon.HashConfigBytes(oldH, oldR)
+		out := []fileDiff{}
+		for _, f := range []struct {
+			name     string
+			old, cur []byte
+			ok       bool
+		}{{"hosts.toml", oldH, curH, okH}, {"rules.toml", oldR, curR, okR}} {
+			d := fileDiff{Name: f.name, Approved: f.ok}
+			if f.ok && !verified {
+				d.Approved, d.Error = false, "không xác minh được bản đã duyệt — xem file trực tiếp"
+			} else if f.ok {
+				d.Diff = unifiedDiff(string(f.old), string(f.cur))
+			}
+			out = append(out, d)
+		}
+		writeJSON(w, map[string]any{"files": out, "hash": daemon.HashConfigBytes(curH, curR)})
 	})
 	mux.HandleFunc("GET /api/setup", func(w http.ResponseWriter, r *http.Request) {
 		rep, err := b.Setup()
@@ -262,8 +371,36 @@ func readLine(br *bufio.Reader, max int) ([]byte, error) {
 	}
 }
 
-// readAudit returns audit entries newest first, filtered and paged.
+// scanAudit returns the audit entries keep accepts, newest first.
 // ponytail: reads the whole file per request; index or tail-read if logs get huge.
+func scanAudit(path string, keep func(audit.Entry) bool) ([]audit.Entry, error) {
+	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var all []audit.Entry
+	br := bufio.NewReader(f)
+	for {
+		line, err := readLine(br, 4<<20) // over-long or unparseable lines are skipped, not fatal
+		if len(line) > 0 {
+			var e audit.Entry
+			if json.Unmarshal(line, &e) == nil && keep(e) {
+				all = append(all, e)
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	sort.SliceStable(all, func(i, j int) bool { return all[i].Time.After(all[j].Time) })
+	return all, nil
+}
+
+// readAudit returns audit entries newest first, filtered and paged.
 // project matches, case-insensitively, a substring of the entry's repo or cwd.
 func readAudit(path, host, decision, since, project string, limit, offset int) ([]audit.Entry, int, error) {
 	project = strings.ToLower(project)
@@ -278,31 +415,13 @@ func readAudit(path, host, decision, since, project string, limit, offset int) (
 		}
 		sinceT = t
 	}
-	f, err := os.Open(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return []audit.Entry{}, 0, nil
-	}
+	all, err := scanAudit(path, func(e audit.Entry) bool {
+		return !(host != "" && e.Host != host) && !(decision != "" && e.Decision != decision) && !(!sinceT.IsZero() && e.Time.Before(sinceT)) &&
+			(project == "" || strings.Contains(strings.ToLower(e.Repo+"\n"+e.Cwd), project))
+	})
 	if err != nil {
 		return nil, 0, err
 	}
-	defer f.Close()
-	var all []audit.Entry
-	br := bufio.NewReader(f)
-	for {
-		line, err := readLine(br, 4<<20) // over-long or unparseable lines are skipped, not fatal
-		if len(line) > 0 {
-			var e audit.Entry
-			if json.Unmarshal(line, &e) == nil &&
-				!(host != "" && e.Host != host) && !(decision != "" && e.Decision != decision) && !(!sinceT.IsZero() && e.Time.Before(sinceT)) &&
-				(project == "" || strings.Contains(strings.ToLower(e.Repo+"\n"+e.Cwd), project)) {
-				all = append(all, e)
-			}
-		}
-		if err != nil {
-			break
-		}
-	}
-	sort.SliceStable(all, func(i, j int) bool { return all[i].Time.After(all[j].Time) })
 	total := len(all)
 	offset = max(0, min(offset, total))
 	end := min(offset+limit, total)

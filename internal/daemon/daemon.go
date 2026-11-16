@@ -48,6 +48,7 @@ type Daemon struct {
 	salt     []byte
 	userOnly bool // config on disk differs from the approved hash
 	jobs     map[int]*sshconn.Job
+	tunnels  map[int]*tunnelEntry
 
 	q      *approval.Queue
 	human  humanok.Confirmer
@@ -71,6 +72,16 @@ type Daemon struct {
 	restartCode atomic.Int32
 	managedFn   func() bool // tests only
 	restarting  atomic.Bool // a successor takes over the socket: do not remove it
+
+	tg tgState
+
+	drainMu   sync.Mutex // guards draining and running
+	draining  bool
+	running   int // commands executing over SSH
+	inflight  sync.WaitGroup
+	forceCh   chan struct{} // closed when a drain must not wait any longer
+	forceOnce sync.Once
+	drained   chan struct{} // closed when Drain has finished
 }
 
 func New(notify func(approval.Notice) error, approvalTimeout time.Duration) (*Daemon, error) {
@@ -80,11 +91,14 @@ func New(notify func(approval.Notice) error, approvalTimeout time.Duration) (*Da
 		}
 	}
 	d := &Daemon{
-		jobs: map[int]*sshconn.Job{},
+		jobs:    map[int]*sshconn.Job{},
+		tunnels: map[int]*tunnelEntry{},
+		forceCh: make(chan struct{}), drained: make(chan struct{}),
 		q:    approval.NewQueue(notify, approvalTimeout),
 		pool: sshconn.NewPool(paths.KnownHosts()),
 		log:  &audit.Log{Path: paths.Audit()},
 	}
+	d.q.OnAdd, d.q.OnResolve = d.tgNotify, d.tgResolved
 	d.human = humanok.Default
 	if why := osAuthOff(runtime.GOOS, os.Getenv("OSTIARY_OS_AUTH")); why != "" {
 		d.human = authOff(why)
@@ -203,29 +217,72 @@ func (d *Daemon) confirm(msg string) error {
 }
 
 func (d *Daemon) loadConfig() error {
-	cfg, err := hosts.Load(paths.Hosts())
+	return d.loadConfigBytes(readOnce(paths.Hosts()), readOnce(paths.Rules()))
+}
+
+// readOnce returns the file's bytes, nil when it cannot be read.
+func readOnce(p string) []byte {
+	b, _ := os.ReadFile(p)
+	return b
+}
+
+// loadConfigBytes installs the config parsed from bytes the caller already read (and verified).
+func (d *Daemon) loadConfigBytes(hb, rb []byte) error {
+	cfg, err := hosts.LoadBytes(hb, paths.Hosts())
 	if err != nil {
 		return err
 	}
-	eng, err := policy.Load(paths.Rules())
+	eng, err := policy.LoadBytes(rb, paths.Rules())
 	if err != nil {
 		return err
 	}
 	d.mu.Lock()
 	d.cfg, d.engine = cfg, eng
 	d.mu.Unlock()
+	d.pruneTunnels()
 	return nil
 }
 
 // ConfigHash fingerprints hosts.toml and rules.toml.
-func ConfigHash() string {
+func ConfigHash() string { return HashConfigFiles(paths.Hosts(), paths.Rules()) }
+
+// HashConfigFiles is ConfigHash over two files (a missing file hashes as empty).
+func HashConfigFiles(hosts, rules string) string {
+	return HashConfigBytes(readOnce(hosts), readOnce(rules))
+}
+
+// HashConfigBytes hashes the contents of hosts.toml and rules.toml.
+func HashConfigBytes(hosts, rules []byte) string {
 	h := sha256.New()
-	for _, p := range []string{paths.Hosts(), paths.Rules()} {
-		b, _ := os.ReadFile(p)
-		fmt.Fprintf(h, "%s\x00%d\x00", filepath.Base(p), len(b))
+	for i, b := range [][]byte{hosts, rules} {
+		fmt.Fprintf(h, "%s\x00%d\x00", [2]string{"hosts.toml", "rules.toml"}[i], len(b))
 		h.Write(b)
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// saveApproved keeps a copy of hosts.toml and rules.toml as last approved
+// (0600), for the reload diff. A missing source removes its copy.
+func saveApproved() { saveApprovedBytes(readOnce(paths.Hosts()), readOnce(paths.Rules())) }
+
+// saveApprovedBytes stores the given contents as the approved copies; nil removes a copy.
+func saveApprovedBytes(hb, rb []byte) {
+	dir := paths.Approved()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		log.Printf("approved config copy: %v", err)
+		return
+	}
+	for i, p := range []string{paths.Hosts(), paths.Rules()} {
+		dst := filepath.Join(dir, filepath.Base(p))
+		b := [][]byte{hb, rb}[i]
+		if b == nil {
+			os.Remove(dst)
+			continue
+		}
+		if err := os.WriteFile(dst, b, 0o600); err != nil {
+			log.Printf("approved config copy: %v", err)
+		}
+	}
 }
 
 func (d *Daemon) autoUnlock() {
@@ -249,6 +306,14 @@ func (d *Daemon) autoUnlock() {
 }
 
 func (d *Daemon) unlock(key *[32]byte, salt []byte) error {
+	if err := d.unlockData(key, salt); err != nil {
+		return err
+	}
+	d.tgResume()
+	return nil
+}
+
+func (d *Daemon) unlockData(key *[32]byte, salt []byte) error {
 	data, err := vault.Open(paths.Vault(), key)
 	if err != nil {
 		return err
@@ -267,6 +332,12 @@ func (d *Daemon) unlock(key *[32]byte, salt []byte) error {
 }
 
 func (d *Daemon) lock() {
+	d.lockData()
+	d.closeTunnelsIf("lock", func(*tunnelEntry) bool { return true })
+	d.tgStop(false)
+}
+
+func (d *Daemon) lockData() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.data != nil {
@@ -338,15 +409,22 @@ func (d *Daemon) Listen() (net.Listener, error) {
 	return ln, nil
 }
 
+// drainOnSignal drains on the first signal and forces on a second.
+func (d *Daemon) drainOnSignal(sig <-chan os.Signal) {
+	<-sig
+	go func() { <-sig; d.Drain(context.Background(), true) }()
+	d.Drain(context.Background(), false)
+}
+
 // Serve answers RPCs on ln (from Listen) until SIGINT/SIGTERM.
 func (d *Daemon) Serve(ln net.Listener) error {
 	sock := paths.Socket()
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sig
-		ln.Close()
-	}()
+	d.mu.Lock()
+	d.ln = ln
+	d.mu.Unlock()
+	go d.drainOnSignal(sig)
 	go func() {
 		for {
 			cleanOut()

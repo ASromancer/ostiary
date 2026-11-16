@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
 	"github.com/ASromancer/ostiary/internal/audit"
+	"github.com/ASromancer/ostiary/internal/paths"
 	"github.com/ASromancer/ostiary/internal/update"
 )
 
@@ -111,7 +113,7 @@ func (d *Daemon) managed() bool {
 
 // restart makes a new daemon take over, then stops this one after delay. If the successor
 // cannot be started it keeps serving and says so.
-func (d *Daemon) restart(delay time.Duration) error {
+func (d *Daemon) restart(delay time.Duration, force bool) error {
 	if !d.restarting.CompareAndSwap(false, true) {
 		return errors.New("restart already in progress")
 	}
@@ -127,18 +129,34 @@ func (d *Daemon) restart(delay time.Duration) error {
 			return fmt.Errorf("the new version is installed but the daemon could not restart (%v); restart Ostiary manually", err)
 		}
 	}
-	time.AfterFunc(delay, func() {
-		d.mu.Lock()
-		ln := d.ln
-		d.mu.Unlock()
-		if ln != nil {
-			ln.Close()
-		}
-	})
+	time.AfterFunc(delay, func() { d.Drain(context.Background(), force) })
 	return nil
 }
 
-// WaitForPredecessor blocks until the old daemon has released the socket (at most 10 s).
+var held func()
+
+// ErrLocked means another daemon holds state/daemon.lock.
+var ErrLocked = errors.New("daemon already running")
+
+// AcquireLock takes the single-daemon lock for the life of the process. A successor passes
+// wait (10 s) so the old daemon can finish exiting; everyone else passes 0 and fails fast.
+func AcquireLock(wait time.Duration) error {
+	os.MkdirAll(paths.State(), 0o700)
+	p := filepath.Join(paths.State(), "daemon.lock")
+	for end := time.Now().Add(wait); ; time.Sleep(100 * time.Millisecond) {
+		rel, err := acquireLock(p)
+		if err == nil {
+			held = rel // keep the file referenced: its finalizer would drop the lock
+			return nil
+		}
+		if !errors.Is(err, ErrLocked) || time.Now().After(end) {
+			return err
+		}
+	}
+}
+
+// WaitForPredecessor also waits for the socket to go quiet (at most 10 s): a predecessor
+// from before the lock existed does not hold it.
 func WaitForPredecessor() {
 	for i := 0; i < 100 && Running(); i++ {
 		time.Sleep(100 * time.Millisecond)
@@ -147,13 +165,13 @@ func WaitForPredecessor() {
 }
 
 // Restart replies, then restarts the daemon (used by 'ostiary upgrade' after installing).
-func (s *Service) Restart(_ *Empty, _ *Empty) error {
+func (s *Service) Restart(a *ShutdownArgs, _ *Empty) error {
 	s.d.log.Write(audit.Entry{Kind: "admin", Cmd: "restart", Decision: "allow"})
-	return s.d.restart(200 * time.Millisecond)
+	return s.d.restart(200*time.Millisecond, a.Force)
 }
 
 // upgrade runs the approved "upgrade" admin op.
-func (d *Daemon) upgrade(version string, r *AdminReply) error {
+func (d *Daemon) upgrade(version string, force bool, r *AdminReply) error {
 	d.mu.Lock()
 	rel := d.release
 	d.mu.Unlock()
@@ -175,7 +193,7 @@ func (d *Daemon) upgrade(version string, r *AdminReply) error {
 	if kind == update.WindowsInstaller {
 		return nil // Setup stops this daemon (ostiary stop) and starts the new one itself
 	}
-	if err := d.restart(time.Second); err != nil {
+	if err := d.restart(time.Second, force); err != nil {
 		r.Out += "; " + err.Error()
 	}
 	return nil

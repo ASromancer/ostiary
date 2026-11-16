@@ -22,6 +22,9 @@ type Data struct {
 	Keys       map[string][]byte `json:"keys"`      // name -> OpenSSH private key PEM
 	Passwords  map[string][]byte `json:"passwords"` // name -> password (supported, not recommended)
 	ConfigHash string            `json:"config_hash"`
+	// Settings holds small named values (the Telegram token and ids). It is
+	// absent in v0.2 vaults, which still open: the field is optional JSON.
+	Settings map[string]string `json:"settings,omitempty"`
 }
 
 // File layout: magic | salt length (1 byte) | salt | nonce (24) | secretbox.
@@ -155,6 +158,9 @@ func Open(path string, key *[32]byte) (*Data, error) {
 	if d.Passwords == nil {
 		d.Passwords = map[string][]byte{}
 	}
+	if d.Settings == nil {
+		d.Settings = map[string]string{}
+	}
 	for _, m := range []map[string][]byte{d.Keys, d.Passwords} {
 		for _, v := range m {
 			lockMemory(v) // best effort
@@ -171,6 +177,7 @@ func (d *Data) Wipe() {
 			delete(m, k)
 		}
 	}
+	clear(d.Settings)
 }
 
 const keyringService, keyringUser = "ostiary", "master-key"

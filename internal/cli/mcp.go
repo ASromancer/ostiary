@@ -31,6 +31,7 @@ Start with the hosts tool. Every command is classified read/mutate/destructive/f
 Destructive commands need the human to approve in a terminal ('ostiary approve'); the run tool then
 returns an approval id: call run again with the same host, command and approval_id until it finishes.
 If a result says the request was denied or blocked, stop and ask the user; never retry another way.
+If it says ostiary is restarting (code 103), wait about 10 seconds and retry the same call once.
 No PTY: use 'top -bn1', 'cat', 'tail -n' instead of interactive programs. Prefer the output tool with
 grep over re-running heavy commands.`
 
@@ -169,7 +170,7 @@ func tool(name, title, desc string, schema map[string]any, readOnly, destructive
 }
 
 var mcpTools = []any{
-	tool("hosts", "List hosts", "Hosts you may use, with their profile (readonly|standard|full) and description.",
+	tool("hosts", "List hosts", "Hosts you may use, with their profile (readonly|strict|standard|full) and description.",
 		obj(map[string]any{}), true, false),
 	tool("run", "Run a command", "Run one shell command on a host. Output keeps the first and last 40 lines; use the output tool for the rest. "+
 		"If approval is needed the result says so: call run again with the same host, command and approval_id.",
@@ -198,6 +199,13 @@ var mcpTools = []any{
 			"approval_id": num("id from a previous 'approval required' result")}, "host", "command"), false, true),
 	tool("job_tail", "Tail a job", "Status and last lines of a background job.",
 		obj(map[string]any{"id": num("job id"), "lines": num("lines to show (default 20)")}, "id"), true, false),
+	tool("tunnel_open", "Open a port tunnel", "Forward a local 127.0.0.1 port to host:port as seen from the host (the target must be in the host's tunnels list). "+
+		"Always needs human approval: if the result says so, call again with the same arguments and approval_id. The tunnel closes after ttl.",
+		obj(map[string]any{"host": str("host"), "target": str("host:port reachable from the host, e.g. 127.0.0.1:5432"),
+			"ttl_seconds": num("lifetime in seconds (default 3600, max 28800)"),
+			"approval_id": num("id from a previous 'approval required' result")}, "host", "target"), false, true),
+	tool("tunnel_list", "List tunnels", "Open tunnels with their local address and expiry.", obj(map[string]any{}), true, false),
+	tool("tunnel_close", "Close a tunnel", "Close an open tunnel.", obj(map[string]any{"id": num("tunnel id")}, "id"), false, false),
 	tool("job_kill", "Kill a job", "Stop a background job.", obj(map[string]any{"id": num("job id")}, "id"), false, false),
 }
 
@@ -254,6 +262,39 @@ func (s *mcpServer) call(name string, a map[string]any) (string, bool) {
 			return fmt.Sprintf("job %d killed\n", id), false
 		}
 		return jobTailText(id, r), false
+	}
+
+	switch name {
+	case "tunnel_list":
+		var l []daemon.TunnelInfo
+		if err := call("A.TunnelList", &daemon.Empty{}, &l); err != nil {
+			return err.Error(), true
+		}
+		return tunnelListText(l), false
+	case "tunnel_close":
+		id := argInt(a, "id")
+		if err := call("A.TunnelClose", &daemon.TunnelArgs{ID: id}, &daemon.Empty{}); err != nil {
+			return err.Error(), true
+		}
+		return fmt.Sprintf("tunnel %d closed\n", id), false
+	case "tunnel_open":
+		x := daemon.TunnelArgs{Env: s.env, Host: argStr(a, "host"), Target: argStr(a, "target"),
+			TTL: time.Duration(argInt(a, "ttl_seconds")) * time.Second, ApprovalID: argInt(a, "approval_id"), WaitMax: approvalPoll}
+		var r daemon.TunnelReply
+		if err := call("A.TunnelOpen", &x, &r); err != nil {
+			return err.Error(), true
+		}
+		switch {
+		case r.Pending != 0 && x.ApprovalID == 0:
+			return fmt.Sprintf("approval required (#%d): opening a tunnel always needs the user. The user must approve in the "+
+				"ostiary UI or run 'ostiary approve' in a terminal. Tell the user, then call tunnel_open again with the same "+
+				"arguments and approval_id=%d.", r.Pending, r.Pending), false
+		case r.Pending != 0:
+			return fmt.Sprintf("still waiting for the user to approve #%d. Call tunnel_open again with approval_id=%d.", r.Pending, r.Pending), false
+		case r.Code != 0:
+			return failText(r.Code, r.Msg), true
+		}
+		return tunnelText(x.Host, x.Target, r), false
 	}
 
 	x := daemon.ExecArgs{Env: s.env, Host: argStr(a, "host"), ApprovalID: argInt(a, "approval_id"), WaitMax: approvalPoll}

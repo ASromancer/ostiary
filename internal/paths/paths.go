@@ -35,6 +35,7 @@ func Hosts() string      { return filepath.Join(Config(), "hosts.toml") }
 func Rules() string      { return filepath.Join(Config(), "rules.toml") }
 func Vault() string      { return filepath.Join(Config(), "vault.bin") }
 func KnownHosts() string { return filepath.Join(Config(), "known_hosts") }
+func Approved() string   { return filepath.Join(State(), "approved") }
 func Audit() string      { return filepath.Join(State(), "audit.jsonl") }
 func Out() string        { return filepath.Join(State(), "out") }
 func SetupState() string { return filepath.Join(State(), "setup.json") }

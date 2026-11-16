@@ -18,6 +18,10 @@ type fakeBackend struct {
 	failAll bool
 	setup   daemon.SetupReply
 	skipped *bool
+	tunnels []daemon.TunnelInfo
+	closed  []int
+	begun   []daemon.BeginArgs
+	hash    string // the vault's approved config hash
 }
 
 func (f *fakeBackend) Status() (daemon.StatusReply, error) {
@@ -44,7 +48,10 @@ func (f *fakeBackend) HostList() (daemon.HostListReply, error) {
 		Trusted: map[string]bool{"web1": true}}, nil
 }
 func (f *fakeBackend) Begin(a daemon.BeginArgs) (daemon.BeginReply, error) {
-	return daemon.BeginReply{Ticket: 77, OSAuth: true, Info: "info:" + a.Op}, nil
+	f.mu.Lock()
+	f.begun = append(f.begun, a)
+	f.mu.Unlock()
+	return daemon.BeginReply{Ticket: 77, OSAuth: true, Info: "info:" + a.Op + ":" + string(a.Pass)}, nil
 }
 func (f *fakeBackend) Admin(a daemon.AdminArgs) (daemon.AdminReply, error) {
 	f.mu.Lock()
@@ -76,3 +83,20 @@ func (f *fakeBackend) SetupSkip(skip bool) error {
 	f.skipped = &skip
 	return nil
 }
+func (f *fakeBackend) Tunnels() ([]daemon.TunnelInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]daemon.TunnelInfo{}, f.tunnels...), nil
+}
+func (f *fakeBackend) TunnelClose(id int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.closed = append(f.closed, id)
+	return nil
+}
+
+func (f *fakeBackend) Telegram() (daemon.TelegramReply, error) {
+	return daemon.TelegramReply{Configured: true, Paired: true, Bot: "ostiary_bot", AllowDestructive: true}, nil
+}
+
+func (f *fakeBackend) ApprovedHash() (string, error) { return f.hash, nil }

@@ -73,7 +73,7 @@ func cmdUpgrade(args []string) int {
 	if daemon.Running() {
 		if c, _ := dial(); c != nil {
 			defer c.Close()
-			if err := c.Call("A.Restart", &daemon.Empty{}, &daemon.Empty{}); err != nil {
+			if err := c.Call("A.Restart", &daemon.ShutdownArgs{}, &daemon.Empty{}); err != nil {
 				return callErr(err)
 			}
 			fmt.Println("restarting the daemon")

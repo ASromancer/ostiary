@@ -20,6 +20,7 @@ import (
 	"golang.org/x/crypto/ssh/knownhosts"
 
 	"github.com/ASromancer/ostiary/internal/approval"
+	"github.com/ASromancer/ostiary/internal/audit"
 	"github.com/ASromancer/ostiary/internal/daemon"
 	"github.com/ASromancer/ostiary/internal/paths"
 )
@@ -65,6 +66,15 @@ func TestAPIDecideAndAdmin(t *testing.T) {
 	}
 	if w := api(t, s, "POST", "/api/admin/begin", `{"op":"trust","name":"web1"}`); !strings.Contains(w.Body.String(), `"Ticket":77`) {
 		t.Fatalf("begin: %s", w.Body.String())
+	}
+	if w := api(t, s, "POST", "/api/admin/begin", `{"op":"telegram-pair","name":"","pass":"tok"}`); !strings.Contains(w.Body.String(), "info:telegram-pair:tok") {
+		t.Fatalf("telegram begin must carry the token: %s", w.Body.String())
+	}
+	if w := api(t, s, "POST", "/api/admin/begin", `{"op":"trust","name":"web1","pass":"tok"}`); strings.Contains(w.Body.String(), "tok") {
+		t.Fatalf("other ops must ignore pass: %s", w.Body.String())
+	}
+	if w := api(t, s, "GET", "/api/telegram", ""); !strings.Contains(w.Body.String(), `"Bot":"ostiary_bot"`) {
+		t.Fatalf("telegram: %s", w.Body.String())
 	}
 	w := api(t, s, "POST", "/api/admin/commit", `{"ticket":77,"op":"host-set","name":"web2","host":{"host":"10.0.0.9","user":"root","agent":true}}`)
 	if w.Code != 200 || len(f.admin) != 1 || f.admin[0].Host == nil || f.admin[0].Host.Host != "10.0.0.9" || f.admin[0].Ticket != 77 {
@@ -275,5 +285,116 @@ func TestReadKnownHostsLimits(t *testing.T) {
 	os.WriteFile(f, []byte(strings.Repeat(good, maxKnownHosts+50)), 0o600)
 	if got := readKnownHosts(f, nil); len(got) != maxKnownHosts {
 		t.Fatalf("cap: got %d entries", len(got))
+	}
+}
+
+func TestAPITunnels(t *testing.T) {
+	f := &fakeBackend{tunnels: []daemon.TunnelInfo{{ID: 7, Host: "web1", Target: "127.0.0.1:5432", Local: "127.0.0.1:41873"}}}
+	s := newServer(Options{Backend: f, Version: "9.9"}, 8123)
+	if w := api(t, s, "GET", "/api/tunnels", ""); w.Code != 200 || !strings.Contains(w.Body.String(), `"Local":"127.0.0.1:41873"`) {
+		t.Fatalf("list: %d %s", w.Code, w.Body.String())
+	}
+	if w := api(t, s, "POST", "/api/tunnels/7/close", "{}"); w.Code != 200 || len(f.closed) != 1 || f.closed[0] != 7 {
+		t.Fatalf("close: %d %v", w.Code, f.closed)
+	}
+	if w := do(t, s, "POST", "/api/tunnels/7/close", apiHost, apiOrigin, "", "application/json", "{}"); w.Code != 401 {
+		t.Fatalf("no cookie: %d", w.Code)
+	}
+	if w := do(t, s, "POST", "/api/tunnels/7/close", apiHost, "", session(t, s), "application/json", "{}"); w.Code != 403 {
+		t.Fatalf("no origin: %d", w.Code)
+	}
+	if len(f.closed) != 1 {
+		t.Fatalf("guarded calls reached the backend: %v", f.closed)
+	}
+}
+
+func TestAPIConfigDiff(t *testing.T) {
+	dir := t.TempDir()
+	hosts, rules, appr := filepath.Join(dir, "hosts.toml"), filepath.Join(dir, "rules.toml"), filepath.Join(dir, "approved")
+	os.Mkdir(appr, 0o700)
+	os.WriteFile(hosts, []byte("a\nb\nc\n"), 0o600)
+	os.WriteFile(filepath.Join(appr, "hosts.toml"), []byte("a\nc\n"), 0o600)
+	fb := &fakeBackend{hash: daemon.HashConfigFiles(filepath.Join(appr, "hosts.toml"), filepath.Join(appr, "rules.toml"))}
+	s := newServer(Options{Backend: fb, HostsFile: hosts, RulesFile: rules, ApprovedDir: appr}, 8123)
+	w := api(t, s, "GET", "/api/config/diff", "")
+	var env struct {
+		Hash  string
+		Files []struct {
+			Name     string
+			Approved bool
+			Diff     string
+		}
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil || len(env.Files) != 2 {
+		t.Fatalf("%v %s", err, w.Body.String())
+	}
+	got := env.Files
+	if env.Hash != daemon.HashConfigFiles(hosts, rules) {
+		t.Fatalf("hash %q is not the hash of the diffed files", env.Hash)
+	}
+	if !got[0].Approved || got[0].Diff != "@@ -1,2 +1,3 @@\n a\n+b\n c\n" {
+		t.Fatalf("hosts: %+v", got[0])
+	}
+	if got[1].Name != "rules.toml" || got[1].Approved || got[1].Diff != "" {
+		t.Fatalf("rules without a copy: %+v", got[1])
+	}
+	// A copy that does not match the vault's hash (an agent wrote it) gives no diff, only a warning.
+	os.WriteFile(filepath.Join(appr, "hosts.toml"), []byte("a\nb\nc\n"), 0o600)
+	w = api(t, s, "GET", "/api/config/diff", "")
+	var badEnv struct {
+		Files []struct {
+			Approved    bool
+			Diff, Error string
+		}
+	}
+	json.Unmarshal(w.Body.Bytes(), &badEnv)
+	bad := badEnv.Files
+	if len(bad) != 2 || bad[0].Approved || bad[0].Diff != "" || !strings.Contains(bad[0].Error, "không xác minh được") {
+		t.Fatalf("tampered copy: %s", w.Body.String())
+	}
+}
+
+func TestAPISummary(t *testing.T) {
+	dir := t.TempDir()
+	af := filepath.Join(dir, "audit.jsonl")
+	now := time.Now()
+	var b strings.Builder
+	for _, e := range []audit.Entry{
+		{Time: now, Kind: "run", Decision: "allow", Cmd: "ls"},
+		{Time: now, Kind: "run", Decision: "allow", Cmd: "pwd"},
+		{Time: now, Kind: "run", Decision: "blocked", Cmd: "rm -rf /"},
+		{Time: now, Kind: "admin", Decision: "approved", Cmd: "reload"},
+		{Time: now.Add(-48 * time.Hour), Kind: "run", Decision: "allow", Cmd: "old"},
+	} {
+		j, _ := json.Marshal(e)
+		b.Write(j)
+		b.WriteByte('\n')
+	}
+	os.WriteFile(af, []byte(b.String()), 0o600)
+	f := &fakeBackend{tunnels: []daemon.TunnelInfo{{ID: 1}, {ID: 2}}}
+	s := newServer(Options{Backend: f, AuditFile: af}, 8123)
+	w := api(t, s, "GET", "/api/summary", "")
+	var got struct {
+		Today       map[string]int
+		LastBlocked *audit.Entry
+		Tunnels     int
+		Telegram    string
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err, w.Body.String())
+	}
+	if got.Today["allow"] != 2 || got.Today["blocked"] != 1 || got.Today["approved"] != 0 ||
+		got.LastBlocked == nil || got.LastBlocked.Cmd != "rm -rf /" || got.Tunnels != 2 || got.Telegram != "paired" {
+		t.Fatalf("%s", w.Body.String())
+	}
+}
+
+func TestAPIReloadBeginCarriesReviewedHash(t *testing.T) {
+	f := &fakeBackend{}
+	s := newServer(Options{Backend: f}, 8123)
+	api(t, s, "POST", "/api/admin/begin", `{"op":"reload","name":"","hash":"abc123"}`)
+	api(t, s, "POST", "/api/admin/begin", `{"op":"host-set","name":"x","hash":"evil"}`)
+	if len(f.begun) != 2 || f.begun[0].Hash != "abc123" || f.begun[1].Hash != "" {
+		t.Fatalf("%+v", f.begun)
 	}
 }

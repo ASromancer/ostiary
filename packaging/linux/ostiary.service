@@ -6,6 +6,7 @@ PartOf=graphical-session.target
 [Service]
 ExecStart=/usr/bin/ostiary daemon
 Restart=on-failure
+TimeoutStopSec=75
 
 [Install]
 WantedBy=graphical-session.target

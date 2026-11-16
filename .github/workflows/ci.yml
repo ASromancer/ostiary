@@ -33,6 +33,9 @@ jobs:
       - name: UI error translation
         if: runner.os == 'Linux'
         run: node internal/ui/testdata/errors_test.mjs
+      - name: UI session grouping
+        if: runner.os == 'Linux'
+        run: node internal/ui/testdata/sessions_test.mjs
       - name: e2e against a real OpenSSH server
         if: runner.os != 'Windows'
         run: |

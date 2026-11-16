@@ -13,9 +13,10 @@ import (
 
 // ostiary-specific exit codes (spec 6.1).
 const (
-	CodeBlocked  = 100 // forbidden, profile does not allow, host not allowed
-	CodeDenied   = 101 // denied or approval timed out
-	CodeNoDaemon = 102 // daemon not running or vault locked
+	CodeBlocked    = 100 // forbidden, profile does not allow, host not allowed
+	CodeDenied     = 101 // denied or approval timed out
+	CodeNoDaemon   = 102 // daemon not running or vault locked
+	CodeRestarting = 103 // draining for a stop, restart or upgrade; retry once shortly
 )
 
 // AgentClaude is the Env.Agent value for Claude Code, the only agent whose
@@ -30,6 +31,12 @@ type Env struct {
 }
 
 type Empty struct{}
+
+// ShutdownArgs is for Shutdown and Restart. An empty {} means Force=false.
+type ShutdownArgs struct{ Force bool }
+
+// RunningInfo is the work a restart would interrupt.
+type RunningInfo struct{ Commands, Jobs, Tunnels int }
 
 type HostInfo struct {
 	Name        string `json:"name"`
@@ -93,6 +100,7 @@ type StatusReply struct {
 	AuthNote                                   string      // why OS authentication is unavailable
 	UI                                         string      // base URL of the web UI, "" when it is not running
 	Update                                     *UpdateInfo // a newer release, nil when up to date or unchecked
+	Running                                    RunningInfo
 }
 
 type UILoginReply struct{ URL string }
@@ -104,7 +112,11 @@ type DecideArgs struct {
 	Code, Choice, Note string
 }
 
-type BeginArgs struct{ Op, Name string }
+type BeginArgs struct {
+	Op, Name string
+	Pass     []byte // telegram-pair only: the bot token (never logged, shown or put in a notification)
+	Hash     string // reload only: ConfigHash of the files the human reviewed ("" = the files as they are now)
+}
 
 type BeginReply struct {
 	Ticket int
@@ -121,6 +133,7 @@ type AdminArgs struct {
 	PEM      []byte
 	Password []byte
 	Pass     []byte // vault passphrase for init (never logged)
+	Force    bool   // upgrade: restart without waiting for running commands
 }
 
 type AdminReply struct{ Out string }
@@ -170,4 +183,23 @@ func Dial() (*rpc.Client, error) {
 type HostListReply struct {
 	Hosts   map[string]hosts.Host
 	Trusted map[string]bool // host key pinned in known_hosts
+}
+
+// ApprovedHashReply is the vault's hash of the last approved config (not secret).
+type ApprovedHashReply struct{ Hash string }
+
+// TelegramReply is the Telegram state for the UI and doctor. It never
+// contains the token.
+type TelegramReply struct {
+	Configured       bool // a bot token is stored
+	Paired           bool
+	Bot              string
+	User             string // Telegram @username of the paired account
+	Pairing          bool
+	AllowDestructive bool
+	LastError        string
+	PairExpires      int64 // unix seconds. The pairing code is never in a status: agents can read it.
+	// A Telegram account that sent the right code and waits for telegram-confirm (not secret).
+	CandUser, CandName string
+	CandID             int64
 }

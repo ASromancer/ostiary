@@ -27,6 +27,8 @@ var adminOps = map[string]bool{
 	"reload": true, "host-set": true, "host-rm": true, "trust": true,
 	"key-gen": true, "key-import": true, "key-rm": true, "key-export": true,
 	"init": true, "hooks": true, "autostart": true, "upgrade": true,
+	"telegram-pair": true, "telegram-unpair": true, "telegram-settings": true,
+	"telegram-confirm": true,
 }
 
 func (s *Service) Unlock(a *UnlockArgs, _ *Empty) error {
@@ -57,12 +59,20 @@ func (s *Service) Unlock(a *UnlockArgs, _ *Empty) error {
 }
 
 func (s *Service) Begin(a *BeginArgs, r *BeginReply) error {
+	defer clear(a.Pass)
 	if !adminOps[a.Op] {
 		return fmt.Errorf("unknown admin op %q", a.Op)
 	}
+	if a.Op == "telegram-pair" || a.Op == "telegram-confirm" {
+		a.Name = "" // the agent must not put text next to the bot name the human sees
+	}
 	switch a.Op {
-	case "reload", "host-set", "host-rm", "key-gen", "key-import", "key-rm", "key-export":
+	case "reload", "host-set", "host-rm", "key-gen", "key-import", "key-rm", "key-export",
+		"telegram-pair", "telegram-unpair", "telegram-settings", "telegram-confirm":
 		// Fail before a ticket or dialog exists: Admin would reject these anyway, after the human authenticated.
+		if a.Op == "telegram-settings" && a.Name != "destructive-on" && a.Name != "destructive-off" {
+			return fmt.Errorf("telegram-settings must be destructive-on or destructive-off, not %q", a.Name)
+		}
 		s.d.mu.Lock()
 		locked := s.d.data == nil
 		s.d.mu.Unlock()
@@ -115,14 +125,42 @@ func (s *Service) Begin(a *BeginArgs, r *BeginReply) error {
 		detail = a.Name + " " + fp
 		data = key
 	}
+	if a.Op == "reload" {
+		h := a.Hash
+		if h == "" {
+			h = ConfigHash()
+		}
+		data = &reloadTicket{hash: h}
+	}
+	if a.Op == "telegram-confirm" {
+		c, err := s.d.telegramConfirmBegin()
+		if err != nil {
+			return err
+		}
+		data, detail, r.Info = c, c.String(), c.String()
+	}
+	if a.Op == "telegram-pair" {
+		// Resolve the bot now so the human approves a named bot, and bind the token to the ticket.
+		tk, err := telegramBegin(a.Pass)
+		if err != nil {
+			return err
+		}
+		data, detail, r.Info = tk, "@"+tk.bot, "@"+tk.bot
+	}
 	r.Ticket, r.Code = s.d.q.Ticket(a.Op+" "+a.Name, detail, data)
 	r.OSAuth = s.d.osAuth()
 	return nil
 }
 
+// reloadTicket binds a reload to the config the human reviewed.
+type reloadTicket struct{ hash string }
+
 func (s *Service) Admin(a *AdminArgs, r *AdminReply) error {
 	d := s.d
 	defer clear(a.Pass)
+	if a.Op == "telegram-pair" || a.Op == "telegram-confirm" {
+		a.Name = ""
+	}
 	op := a.Op + " " + a.Name
 	e := audit.Entry{Kind: "admin", Cmd: strings.TrimSpace(op), Auth: "code"}
 	var data any
@@ -149,6 +187,7 @@ func (s *Service) Admin(a *AdminArgs, r *AdminReply) error {
 		return err
 	}
 	d.log.Write(e)
+	d.pruneTunnels() // host-set/host-rm/key-rm may have taken away what a tunnel relies on
 	return nil
 }
 
@@ -162,6 +201,18 @@ func (d *Daemon) adminMessage(a *AdminArgs, data any) string {
 		return d.upgradeMessage(a.Name)
 	case "hooks":
 		return "install the Ostiary hook for " + a.Name
+	case "telegram-pair": // the bot, never the token
+		if tk, ok := data.(*tgTicket); ok {
+			return "connect Ostiary to Telegram bot @" + tk.bot + " so it can approve agent requests"
+		}
+	case "telegram-confirm":
+		if c, ok := data.(*tgCand); ok {
+			return fmt.Sprintf("pair Telegram account %s with bot @%s; it will be able to approve agent requests", c, c.bot)
+		}
+	case "telegram-unpair":
+		return "disconnect Telegram from Ostiary"
+	case "telegram-settings":
+		return "ostiary telegram " + a.Name
 	case "autostart":
 		if a.Name == "on" {
 			return "start Ostiary automatically at login"
@@ -188,6 +239,8 @@ func (d *Daemon) adminMessage(a *AdminArgs, data any) string {
 
 func (d *Daemon) admin(a *AdminArgs, data any, r *AdminReply) error {
 	var authNow error
+	var hb, rb []byte // reload: the bytes that were verified, loaded and approved
+	var approvedHash string
 	switch a.Op {
 	case "init":
 		key, salt := vault.NewKey(), []byte(nil)
@@ -206,6 +259,7 @@ func (d *Daemon) admin(a *AdminArgs, data any, r *AdminReply) error {
 			return fmt.Errorf("OS keyring unavailable (%v); choose a passphrase instead", err)
 		}
 		r.Out = "vault created: " + paths.Vault()
+		saveApproved()
 		err := d.loadConfig()
 		if err == nil {
 			err = d.unlock(key, salt)
@@ -224,7 +278,9 @@ func (d *Daemon) admin(a *AdminArgs, data any, r *AdminReply) error {
 		r.Out = "installed the Ostiary hook for " + a.Name
 		return nil
 	case "upgrade":
-		return d.upgrade(a.Name, r)
+		return d.upgrade(a.Name, a.Force, r)
+	case "telegram-pair", "telegram-unpair", "telegram-settings", "telegram-confirm":
+		return d.telegramAdmin(a, data, r)
 	case "autostart":
 		if d.setup.SetAutostart == nil {
 			return errors.New("autostart is not available in this daemon")
@@ -239,7 +295,13 @@ func (d *Daemon) admin(a *AdminArgs, data any, r *AdminReply) error {
 		return nil
 	}
 	if a.Op == "reload" {
-		if err := d.loadConfig(); err != nil {
+		tk, _ := data.(*reloadTicket)
+		hb, rb = readOnce(paths.Hosts()), readOnce(paths.Rules())
+		approvedHash = HashConfigBytes(hb, rb)
+		if tk == nil || tk.hash != approvedHash {
+			return errors.New("cấu hình đã thay đổi sau khi bạn xem — hãy xem lại")
+		}
+		if err := d.loadConfigBytes(hb, rb); err != nil {
 			return err
 		}
 		authNow = d.reloadAuth()
@@ -266,7 +328,8 @@ func (d *Daemon) admin(a *AdminArgs, data any, r *AdminReply) error {
 	}
 	switch a.Op {
 	case "reload":
-		d.data.ConfigHash = ConfigHash()
+		d.data.ConfigHash = approvedHash
+		saveApprovedBytes(hb, rb)
 		d.userOnly = false
 		r.Out = fmt.Sprintf("reloaded %d hosts; approvals use OS authentication", len(d.cfg.Hosts))
 		if err := d.authProblem(); err != nil {
@@ -301,6 +364,7 @@ func (d *Daemon) admin(a *AdminArgs, data any, r *AdminReply) error {
 		}
 		d.cfg = cfg
 		d.data.ConfigHash = ConfigHash()
+		saveApproved()
 		r.Out = "saved " + paths.Hosts()
 	case "key-gen":
 		if _, exists := d.data.Keys[a.Name]; exists {

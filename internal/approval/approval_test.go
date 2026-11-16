@@ -317,3 +317,19 @@ func TestExpiresSet(t *testing.T) {
 		t.Fatalf("%+v", p)
 	}
 }
+
+func TestHooksAndTelegramAuth(t *testing.T) {
+	q := NewQueue(func(Notice) error { return nil }, time.Minute)
+	var added Request
+	var got Decision
+	q.OnAdd = func(r Request) { added = r }
+	q.OnResolve = func(_ int, d Decision) { got = d }
+	q.Add(Request{ID: 7, Cmd: "x"})
+	if added.ID != 7 || added.Expires.IsZero() {
+		t.Fatalf("%+v", added)
+	}
+	d, err := q.Resolve(7, "y", "", "telegram")
+	if err != nil || !d.OK || d.Auth != "telegram" || got.Auth != "telegram" {
+		t.Fatalf("%+v %v %+v", d, err, got)
+	}
+}

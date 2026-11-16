@@ -94,8 +94,17 @@ func New(extra []Rule) (*Engine, error) {
 
 // Load builds an engine with the user's rules.toml (if it exists) on top of the defaults.
 func Load(path string) (*Engine, error) {
+	b, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return LoadBytes(b, path)
+}
+
+// LoadBytes is Load over rules.toml content already read (name is for errors).
+func LoadBytes(b []byte, path string) (*Engine, error) {
 	var user struct{ Rule []Rule }
-	if _, err := toml.DecodeFile(path, &user); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if _, err := toml.Decode(string(b), &user); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return New(user.Rule)
@@ -130,11 +139,12 @@ func (e *Engine) lookup(line string) (Level, string, bool) {
 // Profiles, from most to least restrictive.
 const (
 	ProfileReadonly = "readonly"
+	ProfileStrict   = "strict"
 	ProfileStandard = "standard"
 	ProfileFull     = "full"
 )
 
-var profileRank = map[string]int{ProfileReadonly: 0, ProfileStandard: 1, ProfileFull: 2}
+var profileRank = map[string]int{ProfileReadonly: 0, ProfileStrict: 1, ProfileStandard: 2, ProfileFull: 3}
 
 func ValidProfile(p string) bool { _, ok := profileRank[p]; return ok }
 
@@ -170,6 +180,8 @@ func Decide(l Level, profile string) Action {
 	case profile == ProfileReadonly:
 		return Block
 	case l == Destructive:
+		return Approve
+	case profile == ProfileStrict:
 		return Approve
 	case profile == ProfileFull:
 		return Run

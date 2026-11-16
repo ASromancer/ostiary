@@ -203,11 +203,16 @@ func TestDecide(t *testing.T) {
 	}{
 		{Read, ProfileReadonly, Run}, {Mutate, ProfileReadonly, Block}, {Destructive, ProfileReadonly, Block},
 		{Mutate, ProfileStandard, Ask}, {Destructive, ProfileStandard, Approve}, {Forbidden, ProfileStandard, Block},
+		{Read, ProfileStrict, Run}, {Mutate, ProfileStrict, Approve}, {Destructive, ProfileStrict, Approve}, {Forbidden, ProfileStrict, Block},
+		{Read, ProfileStandard, Run}, {Read, ProfileFull, Run},
 		{Mutate, ProfileFull, Run}, {Destructive, ProfileFull, Approve}, {Forbidden, ProfileFull, Block},
 	} {
 		if got := Decide(tc.l, tc.profile); got != tc.want {
 			t.Errorf("%s/%s: got %s want %s", tc.l, tc.profile, got, tc.want)
 		}
+	}
+	if Stricter("strict", "standard") != "strict" || Stricter("standard", "strict") != "strict" || Stricter("readonly", "strict") != "readonly" || !ValidProfile("strict") {
+		t.Error("strict rank")
 	}
 	if Stricter("full", "standard") != "standard" || Stricter("readonly", "full") != "readonly" || Stricter("full", "") != "full" {
 		t.Error("Stricter")
