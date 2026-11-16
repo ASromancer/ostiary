@@ -75,7 +75,7 @@ class UI:
 
 class FakeTelegram(http.server.BaseHTTPRequestHandler):
     """A fake Telegram Bot API: scripted updates in, every call recorded."""
-    token = "111:E2E"
+    token = "111111:E2EtokenE2EtokenE2EtokenE2Etoken12"
     lock = threading.Lock()
     updates, calls, next_msg = [], [], [500]
 
@@ -93,6 +93,7 @@ class FakeTelegram(http.server.BaseHTTPRequestHandler):
             elif m == "sendMessage":
                 self.next_msg[0] += 1
                 res = {"message_id": self.next_msg[0]}
+                body["_id"] = self.next_msg[0]
             elif m == "getUpdates":
                 res, self.updates[:] = list(self.updates), []
         if m == "getUpdates" and not res:
@@ -621,15 +622,16 @@ def main():
         check(f"#req={rid}" in notes, "approval notification links to the UI request", notes[-300:])
         # Telegram: pair through the UI admin path, then approve a request from a callback.
         open(gate, "w").write("allow")
-        st, _, body = ui.req("POST", "/api/admin/begin", {"Op": "telegram-pair", "Name": ""})
+        st, _, body = ui.req("POST", "/api/admin/begin", {"Op": "telegram-pair", "Name": "", "Pass": " " + FakeTelegram.token + "\n"})
         tk = json.loads(body).get("Ticket")
-        st2, _, body = ui.req("POST", "/api/admin/commit", {"Ticket": tk, "Op": "telegram-pair", "Name": "", "Pass": FakeTelegram.token})
+        check(json.loads(body).get("Info") == "@e2e_bot", "telegram-pair Begin names the bot for the approval", body)
+        st2, _, body = ui.req("POST", "/api/admin/commit", {"Ticket": tk, "Op": "telegram-pair", "Name": ""})
         mt = re.match(r"@e2e_bot (\d{6})$", json.loads(body).get("out", ""))
         check(st == 200 and st2 == 200 and mt, "telegram-pair via the UI stores the token and returns bot + code", body)
         check(FakeTelegram.token not in open(f"{HOME}/.local/state/ostiary/audit.jsonl").read() and
               FakeTelegram.token not in open(NOTES).read(), "the bot token is not in the audit log or notifications")
         FakeTelegram.push({"update_id": 1, "message": {"message_id": 1, "chat": {"id": 42, "type": "private"},
-                                                       "from": {"id": 42}, "text": "/pair " + mt.group(1)}})
+                                                       "from": {"id": 42, "username": "alice"}, "date": int(time.time()), "text": "/pair " + mt.group(1)}})
         for _ in range(50):
             tgs = json.loads(ui.req("GET", "/api/telegram")[2])
             if tgs.get("Paired"):
@@ -644,7 +646,7 @@ def main():
         btns = [b for row in msg["reply_markup"]["inline_keyboard"] for b in row]
         approve = next(b for b in btns if b["callback_data"].split(":")[1] == "y")["callback_data"]
         rid_tg, _, nonce_tg = approve.split(":")
-        mid = {"message_id": 501, "chat": {"id": 42, "type": "private"}}
+        mid = {"message_id": msg["_id"], "chat": {"id": 42, "type": "private"}}
         FakeTelegram.push({"update_id": 2, "callback_query": {"id": "bad", "from": {"id": 99}, "message": mid, "data": approve}})
         FakeTelegram.find("answerCallbackQuery", lambda b: b["callback_query_id"] == "bad" and b["text"] == "không hợp lệ")
         check(agent.poll() is None and os.path.exists(victimtg), "a callback from another Telegram user is ignored")

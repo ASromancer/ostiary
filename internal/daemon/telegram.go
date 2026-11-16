@@ -58,6 +58,25 @@ func (d *Daemon) tgStart(token, bot string, chat, user int64, allow bool) (*tele
 	return svc, nil
 }
 
+// tgTicket is what a telegram-pair ticket carries: the token checked at Begin
+// and the bot it belongs to, which the human sees before approving.
+type tgTicket struct{ token, bot string }
+
+// telegramBegin trims and validates the pasted token and asks Telegram which bot it is.
+func telegramBegin(pass []byte) (*tgTicket, error) {
+	token, err := telegram.ValidToken(string(pass))
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	name, err := (&telegram.Bot{Token: token}).GetMe(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &tgTicket{token: token, bot: name}, nil
+}
+
 // tgStop stops polling and notifying. permanent (drain) also refuses later starts.
 func (d *Daemon) tgStop(permanent bool) {
 	d.tg.mu.Lock()
@@ -66,7 +85,7 @@ func (d *Daemon) tgStop(permanent bool) {
 	if d.tg.cancel != nil {
 		d.tg.cancel()
 		d.tg.svc.Stop()
-		if !permanent { // lock: the token must not stay in memory
+		if !permanent { // lock: drop the service (Go strings cannot be wiped, so the token lingers until GC)
 			d.tg.svc, d.tg.cancel = nil, nil
 		} else {
 			d.tg.cancel = nil
@@ -96,8 +115,8 @@ func (d *Daemon) tgResume() {
 	if s[setTGToken] == "" || chat == 0 || user == 0 {
 		return
 	}
-	if _, err := d.tgStart(s[setTGToken], s[setTGBot], chat, user, s[setTGDestOn] != "off"); err != nil {
-		return
+	if svc, err := d.tgStart(s[setTGToken], s[setTGBot], chat, user, s[setTGDestOn] != "off"); err == nil {
+		svc.SetUser(s[setTGUser+"name"])
 	}
 }
 
@@ -116,7 +135,7 @@ func (d *Daemon) tgResolved(id int, dec approval.Decision) {
 // tgResolve is the only way Telegram decides anything: an agent request
 // that is still pending, never a sticky approval for a destructive command
 // or a tunnel.
-func (d *Daemon) tgResolve(id int, choice string) error {
+func (d *Daemon) tgResolve(id int, choice string, user int64) error {
 	if d.isDraining() {
 		return errors.New("ostiary is restarting")
 	}
@@ -127,7 +146,11 @@ func (d *Daemon) tgResolve(id int, choice string) error {
 	if choice == "s" && (req.Level == policy.Destructive.String() || req.Kind == "tunnel") {
 		return errors.New("not approvable for 30 minutes")
 	}
-	_, err := d.q.Resolve(id, choice, "", "telegram")
+	dec, err := d.q.Resolve(id, choice, "", "telegram")
+	if err == nil { // who pressed the button, next to the request's own audit entry
+		d.log.Write(audit.Entry{Kind: "approve", ID: id, Host: req.Host, Cmd: "telegram #" + strconv.Itoa(id),
+			Decision: dec.Outcome, Auth: "telegram", Note: "telegram user id " + strconv.FormatInt(user, 10)})
+	}
 	return err
 }
 
@@ -138,6 +161,7 @@ func (s *Service) TelegramStatus(_ *Empty, r *TelegramReply) error {
 	if d.data != nil {
 		r.Configured = d.data.Settings[setTGToken] != ""
 		r.Bot = d.data.Settings[setTGBot]
+		r.User = d.data.Settings[setTGUser+"name"]
 		r.AllowDestructive = d.data.Settings[setTGDestOn] != "off"
 	}
 	d.mu.Unlock()
@@ -147,16 +171,23 @@ func (s *Service) TelegramStatus(_ *Empty, r *TelegramReply) error {
 		if st.Bot != "" {
 			r.Bot = st.Bot
 		}
+		if st.User != "" {
+			r.User = st.User
+		}
 	}
 	return nil
 }
 
 // telegramAdmin runs an approved telegram-* admin op. The bot token arrives
 // in a.Pass, never in a name that is shown, audited or put in a notification.
-func (d *Daemon) telegramAdmin(a *AdminArgs, r *AdminReply) error {
+func (d *Daemon) telegramAdmin(a *AdminArgs, data any, r *AdminReply) error {
 	switch a.Op {
 	case "telegram-pair":
-		return d.telegramPair(string(a.Pass), r)
+		tk, ok := data.(*tgTicket) // the ticket's token only; Admin's Pass is ignored
+		if !ok {
+			return errors.New("approval ticket has no bot; start again")
+		}
+		return d.telegramPair(tk, r)
 	case "telegram-settings":
 		on := a.Name == "destructive-on"
 		d.mu.Lock()
@@ -183,56 +214,42 @@ func (d *Daemon) telegramAdmin(a *AdminArgs, r *AdminReply) error {
 	if d.data == nil {
 		return errors.New("vault is locked; run 'ostiary unlock' first")
 	}
-	for _, k := range []string{setTGToken, setTGBot, setTGChat, setTGUser} {
+	for _, k := range []string{setTGToken, setTGBot, setTGChat, setTGUser, setTGUser + "name"} {
 		delete(d.data.Settings, k)
 	}
 	r.Out = "telegram disconnected"
 	return d.saveVault()
 }
 
-func (d *Daemon) telegramPair(token string, r *AdminReply) error {
-	if token == "" {
-		return errors.New("paste the bot token from @BotFather")
-	}
-	d.mu.Lock()
-	locked := d.data == nil
-	d.mu.Unlock()
-	if locked {
-		return errors.New("vault is locked; run 'ostiary unlock' first")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	name, err := (&telegram.Bot{Token: token}).GetMe(ctx)
-	if err != nil {
-		return err
-	}
+func (d *Daemon) telegramPair(tk *tgTicket, r *AdminReply) error {
 	d.mu.Lock()
 	if d.data == nil {
 		d.mu.Unlock()
 		return errors.New("vault is locked; run 'ostiary unlock' first")
 	}
-	d.data.Settings[setTGToken], d.data.Settings[setTGBot] = token, name
-	delete(d.data.Settings, setTGChat)
-	delete(d.data.Settings, setTGUser)
+	d.data.Settings[setTGToken], d.data.Settings[setTGBot] = tk.token, tk.bot
+	for _, k := range []string{setTGChat, setTGUser, setTGUser + "name"} {
+		delete(d.data.Settings, k)
+	}
 	allow := d.data.Settings[setTGDestOn] != "off"
-	err = d.saveVault()
+	err := d.saveVault()
 	d.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	svc, err := d.tgStart(token, name, 0, 0, allow)
+	svc, err := d.tgStart(tk.token, tk.bot, 0, 0, allow)
 	if err != nil {
 		return err
 	}
 	p := svc.BeginPairing("")
 	code := svc.PairCode()
-	go d.tgFinishPairing(svc, p)
-	r.Out = fmt.Sprintf("@%s %s", name, code)
+	go d.tgFinishPairing(svc, tk.bot, p)
+	r.Out = fmt.Sprintf("@%s %s", tk.bot, code)
 	return nil
 }
 
 // tgFinishPairing stores the chat and user ids once the human has sent /pair <code>.
-func (d *Daemon) tgFinishPairing(svc *telegram.Service, p *telegram.Pairing) {
+func (d *Daemon) tgFinishPairing(svc *telegram.Service, bot string, p *telegram.Pairing) {
 	ctx, cancel := context.WithTimeout(context.Background(), 11*time.Minute)
 	defer cancel()
 	chat, user, err := p.Result(ctx)
@@ -240,15 +257,30 @@ func (d *Daemon) tgFinishPairing(svc *telegram.Service, p *telegram.Pairing) {
 		svc.SetError(fmt.Errorf("Telegram: ghép đôi không thành công (%v)", err))
 		return
 	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.tgService() != svc || d.data == nil {
+	uname := svc.Status().User
+	err = func() error {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		if d.tgService() != svc || d.data == nil {
+			return errors.New("superseded")
+		}
+		d.data.Settings[setTGChat], d.data.Settings[setTGUser] = strconv.FormatInt(chat, 10), strconv.FormatInt(user, 10)
+		d.data.Settings[setTGUser+"name"] = uname
+		return d.saveVault()
+	}()
+	if err != nil {
+		if err.Error() != "superseded" {
+			svc.SetError(err)
+		}
 		return
 	}
-	d.data.Settings[setTGChat], d.data.Settings[setTGUser] = strconv.FormatInt(chat, 10), strconv.FormatInt(user, 10)
-	if err := d.saveVault(); err != nil {
-		svc.SetError(err)
-		return
+	who := "id " + strconv.FormatInt(user, 10)
+	if uname != "" {
+		who = "@" + uname + " (id " + strconv.FormatInt(user, 10) + ")"
 	}
-	d.log.Write(audit.Entry{Kind: "admin", Cmd: "telegram-paired", Decision: "allow"})
+	d.log.Write(audit.Entry{Kind: "admin", Cmd: "telegram-paired", Decision: "allow",
+		Note: fmt.Sprintf("bot @%s, telegram user %s, chat id %d", bot, who, chat)})
+	if d.q.Notify != nil {
+		_ = d.q.Notify(approval.Notice{Title: "Ostiary", Body: fmt.Sprintf("Ostiary đã kết nối với Telegram %s qua @%s", who, bot)})
+	}
 }

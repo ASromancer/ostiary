@@ -18,21 +18,24 @@ func TestTelegramResolveRules(t *testing.T) {
 	add(2, "destructive", "run")
 	add(3, "mutate", "tunnel")
 	for _, id := range []int{2, 3} {
-		if err := d.tgResolve(id, "s"); err == nil {
+		if err := d.tgResolve(id, "s", 42); err == nil {
 			t.Fatalf("#%d: sticky approval over Telegram allowed", id)
 		}
 	}
-	if err := d.tgResolve(1, "y"); err != nil {
+	if err := d.tgResolve(1, "y", 42); err != nil {
 		t.Fatal(err)
+	}
+	if a := h.auditText(); !strings.Contains(a, "telegram user id 42") {
+		t.Fatal("telegram user not audited:", a)
 	}
 	_, dec, done, ok := d.q.WaitFor(1, time.Second)
 	if !ok || !done || !dec.OK || dec.Auth != "telegram" {
 		t.Fatalf("%+v", dec)
 	}
-	if err := d.tgResolve(1, "y"); err == nil {
+	if err := d.tgResolve(1, "y", 42); err == nil {
 		t.Fatal("decided request resolved twice")
 	}
-	if err := d.tgResolve(99, "n"); err == nil {
+	if err := d.tgResolve(99, "n", 42); err == nil {
 		t.Fatal("unknown request resolved")
 	}
 }
@@ -45,7 +48,7 @@ func TestTelegramSettingsAndUnpair(t *testing.T) {
 	d.data.Settings[setTGChat] = "7"
 	d.mu.Unlock()
 	var r AdminReply
-	if err := d.telegramAdmin(&AdminArgs{Op: "telegram-settings", Name: "destructive-off"}, &r); err != nil {
+	if err := d.telegramAdmin(&AdminArgs{Op: "telegram-settings", Name: "destructive-off"}, nil, &r); err != nil {
 		t.Fatal(err)
 	}
 	var st TelegramReply
@@ -53,7 +56,7 @@ func TestTelegramSettingsAndUnpair(t *testing.T) {
 	if !st.Configured || st.AllowDestructive {
 		t.Fatalf("%+v", st)
 	}
-	if err := d.telegramAdmin(&AdminArgs{Op: "telegram-unpair"}, &r); err != nil {
+	if err := d.telegramAdmin(&AdminArgs{Op: "telegram-unpair"}, nil, &r); err != nil {
 		t.Fatal(err)
 	}
 	h.call("TelegramStatus", &Empty{}, &st)
@@ -62,5 +65,26 @@ func TestTelegramSettingsAndUnpair(t *testing.T) {
 	}
 	if strings.Contains(h.auditText(), "SECRET") {
 		t.Fatal("token in audit log")
+	}
+}
+
+func TestTelegramPairBoundToTicketBot(t *testing.T) {
+	h := unlocked(t)
+	// a bad token fails in Begin, before any ticket, and never echoes the token
+	bad := "123456:short-secret-value\n"
+	var r BeginReply
+	err := h.call("Begin", &BeginArgs{Op: "telegram-pair", Pass: []byte(bad)}, &r)
+	if err == nil || strings.Contains(err.Error(), "short-secret") || r.Ticket != 0 {
+		t.Fatalf("%v %+v", err, r)
+	}
+	// the human is told which bot
+	msg := h.d.adminMessage(&AdminArgs{Op: "telegram-pair"}, &tgTicket{token: "123456:TOKENTOKEN", bot: "my_bot"})
+	if !strings.Contains(msg, "@my_bot") || !strings.Contains(msg, "approve agent requests") || strings.Contains(msg, "TOKENTOKEN") {
+		t.Fatal(msg)
+	}
+	// Admin has no token of its own: without the ticket's bot it refuses
+	var ar AdminReply
+	if err := h.d.telegramAdmin(&AdminArgs{Op: "telegram-pair", Pass: []byte("999:" + strings.Repeat("x", 40))}, nil, &ar); err == nil {
+		t.Fatal("paired with a token that was not in the ticket")
 	}
 }

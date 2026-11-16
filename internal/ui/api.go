@@ -83,9 +83,13 @@ func (s *Server) routes(mux *http.ServeMux) {
 		writeJSON(w, h)
 	})
 	mux.HandleFunc("POST /api/admin/begin", func(w http.ResponseWriter, r *http.Request) {
-		var a daemon.BeginArgs
-		if !readJSON(w, r, &a) {
+		var in struct{ Op, Name, Pass string }
+		if !readJSON(w, r, &in) {
 			return
+		}
+		a := daemon.BeginArgs{Op: in.Op, Name: in.Name}
+		if in.Op == "telegram-pair" { // the bot token, for this op only
+			a.Pass = []byte(in.Pass)
 		}
 		rep, err := b.Begin(a)
 		if err != nil {

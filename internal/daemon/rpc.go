@@ -112,7 +112,10 @@ type DecideArgs struct {
 	Code, Choice, Note string
 }
 
-type BeginArgs struct{ Op, Name string }
+type BeginArgs struct {
+	Op, Name string
+	Pass     []byte // telegram-pair only: the bot token (never logged, shown or put in a notification)
+}
 
 type BeginReply struct {
 	Ticket int
@@ -187,6 +190,7 @@ type TelegramReply struct {
 	Configured       bool // a bot token is stored
 	Paired           bool
 	Bot              string
+	User             string // Telegram @username of the paired account
 	Pairing          bool
 	AllowDestructive bool
 	LastError        string

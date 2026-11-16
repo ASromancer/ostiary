@@ -58,6 +58,7 @@ func (s *Service) Unlock(a *UnlockArgs, _ *Empty) error {
 }
 
 func (s *Service) Begin(a *BeginArgs, r *BeginReply) error {
+	defer clear(a.Pass)
 	if !adminOps[a.Op] {
 		return fmt.Errorf("unknown admin op %q", a.Op)
 	}
@@ -120,6 +121,14 @@ func (s *Service) Begin(a *BeginArgs, r *BeginReply) error {
 		detail = a.Name + " " + fp
 		data = key
 	}
+	if a.Op == "telegram-pair" {
+		// Resolve the bot now so the human approves a named bot, and bind the token to the ticket.
+		tk, err := telegramBegin(a.Pass)
+		if err != nil {
+			return err
+		}
+		data, detail, r.Info = tk, "@"+tk.bot, "@"+tk.bot
+	}
 	r.Ticket, r.Code = s.d.q.Ticket(a.Op+" "+a.Name, detail, data)
 	r.OSAuth = s.d.osAuth()
 	return nil
@@ -167,8 +176,10 @@ func (d *Daemon) adminMessage(a *AdminArgs, data any) string {
 		return d.upgradeMessage(a.Name)
 	case "hooks":
 		return "install the Ostiary hook for " + a.Name
-	case "telegram-pair": // never the token
-		return "connect Ostiary to a Telegram bot"
+	case "telegram-pair": // the bot, never the token
+		if tk, ok := data.(*tgTicket); ok {
+			return "connect Ostiary to Telegram bot @" + tk.bot + " so it can approve agent requests"
+		}
 	case "telegram-unpair":
 		return "disconnect Telegram from Ostiary"
 	case "telegram-settings":
@@ -237,7 +248,7 @@ func (d *Daemon) admin(a *AdminArgs, data any, r *AdminReply) error {
 	case "upgrade":
 		return d.upgrade(a.Name, a.Force, r)
 	case "telegram-pair", "telegram-unpair", "telegram-settings":
-		return d.telegramAdmin(a, r)
+		return d.telegramAdmin(a, data, r)
 	case "autostart":
 		if d.setup.SetAutostart == nil {
 			return errors.New("autostart is not available in this daemon")
