@@ -295,6 +295,95 @@ func cmdJob(args []string) int {
 	return errf(2, "unknown job subcommand %q", sub)
 }
 
+func tunnelText(host, target string, r daemon.TunnelReply) string {
+	return fmt.Sprintf("tunnel %d %s -> %s via %s until %s\n", r.ID, r.Local, target, host, r.Until.Local().Format("15:04"))
+}
+
+func tunnelListText(l []daemon.TunnelInfo) string {
+	if len(l) == 0 {
+		return "no open tunnels\n"
+	}
+	var b strings.Builder
+	for _, t := range l {
+		fmt.Fprintf(&b, "tunnel %d %s -> %s via %s until %s (%d conns, %d B in, %d B out)\n",
+			t.ID, t.Local, t.Target, t.Host, t.Until.Local().Format("15:04"), t.Conns, t.BytesIn, t.BytesOut)
+	}
+	return b.String()
+}
+
+func cmdTunnel(args []string) int {
+	if len(args) == 0 {
+		return errf(2, "usage: ostiary tunnel open <host> <host:port> [--ttl 1h] | list | close <id>")
+	}
+	sub := args[0]
+	fs := newFlags("tunnel " + sub)
+	ttl := fs.Duration("ttl", daemon.DefaultTunnelTTL, "how long the tunnel stays open (max 8h)")
+	pos, err := parse(fs, args[1:])
+	if err != nil {
+		return 2
+	}
+	c, code := dial()
+	if c == nil {
+		return code
+	}
+	defer c.Close()
+	switch sub {
+	case "open":
+		if len(pos) != 2 {
+			return errf(2, "usage: ostiary tunnel open <host> <host:port> [--ttl 1h]")
+		}
+		a := daemon.TunnelArgs{Env: env(), Host: pos[0], Target: pos[1], TTL: *ttl}
+		retried := false
+		for {
+			var r daemon.TunnelReply
+			if err := c.Call("A.TunnelOpen", &a, &r); err != nil {
+				return callErr(err)
+			}
+			switch {
+			case r.Code == daemon.CodeRestarting && !retried:
+				retried = true
+				fmt.Fprintf(os.Stderr, "ostiary: restarting; retrying in %s\n", restartWait)
+				c.Close()
+				time.Sleep(restartWait)
+				if c, code = dial(); c == nil {
+					return code
+				}
+				defer c.Close()
+				a.ApprovalID = 0
+			case r.Code != 0:
+				return agentFail(r.Code, r.Msg)
+			case r.Pending != 0:
+				fmt.Fprintf(os.Stderr, "ostiary: waiting approval #%d — run 'ostiary approve' in another terminal\n", r.Pending)
+				a.ApprovalID = r.Pending
+			default:
+				fmt.Print(tunnelText(pos[0], pos[1], r))
+				return 0
+			}
+		}
+	case "list":
+		var l []daemon.TunnelInfo
+		if err := c.Call("A.TunnelList", &daemon.Empty{}, &l); err != nil {
+			return callErr(err)
+		}
+		fmt.Print(tunnelListText(l))
+		return 0
+	case "close":
+		if len(pos) != 1 {
+			return errf(2, "usage: ostiary tunnel close <id>")
+		}
+		id, err := strconv.Atoi(pos[0])
+		if err != nil {
+			return errf(2, "bad id %q", pos[0])
+		}
+		if err := c.Call("A.TunnelClose", &daemon.TunnelArgs{ID: id}, &daemon.Empty{}); err != nil {
+			return callErr(err)
+		}
+		fmt.Printf("tunnel %d closed\n", id)
+		return 0
+	}
+	return errf(2, "unknown tunnel subcommand %q", sub)
+}
+
 func cmdExplain(args []string) int {
 	fs := newFlags("explain")
 	host := fs.String("host", "", "also show what the host's profile would do")

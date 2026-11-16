@@ -80,6 +80,7 @@ ostiary out <id> [--grep <regexp>] [--range a:b]
 ostiary get <host>:<remote-path> <local-path>
 ostiary put <local-path> <host>:<remote-path>
 ostiary job start <host> "<cmd>" | job tail <id> [--lines N] | job kill <id>
+ostiary tunnel open <host> <host:port> [--ttl 1h] | tunnel list | tunnel close <id>
 ostiary explain "<cmd>" [--host <host>]
 ```
 
@@ -100,6 +101,25 @@ An ostiary run passes the remote command's exit code through unchanged. ostiary 
 | 103 | ostiary is restarting (stop, upgrade): wait about 10 s and retry once; the CLI does this itself |
 
 If ostiary itself produced the exit code, it also prints a stderr line starting with `ostiary:`. If the remote command happens to exit with 100–103, no such line appears.
+
+## Tunnels
+
+A tunnel forwards a port on `127.0.0.1` to a `host:port` as seen from the SSH server, so an agent can reach a database or internal service that is not exposed. Allow-list the targets per host in `hosts.toml`:
+
+```toml
+[hosts.db1]
+tunnels = ["127.0.0.1:5432", "db.internal:3306"]
+```
+
+```text
+$ ostiary tunnel open db1 127.0.0.1:5432 --ttl 30m
+tunnel 7 127.0.0.1:41873 -> 127.0.0.1:5432 via db1 until 15:42
+```
+
+- Opening a tunnel always needs your approval (OS dialog, code or the UI), at level `destructive`; there is no 30-minute option. A target that is not in `tunnels` is refused with exit code 100 before any approval is asked.
+- The default lifetime is 1 hour, the maximum 8 hours. A tunnel closes on `ostiary tunnel close <id>`, when the TTL ends, or when the daemon stops or restarts. The audit log records the open and the close (reason, bytes in and out, connections). MCP has `tunnel_open`, `tunnel_list` and `tunnel_close`.
+- Known limit: while a tunnel is open, any local process of any user can connect to its loopback port. The TTL keeps that window short.
+- A tunnel is a network path only. Ostiary does not handle database passwords; the agent still needs credentials, and we recommend a read-only database user.
 
 ## Agents
 

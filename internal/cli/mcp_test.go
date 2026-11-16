@@ -76,7 +76,7 @@ func TestMCP(t *testing.T) {
 	if v := res[1]["result"].(map[string]any)["protocolVersion"]; v != "2025-06-18" {
 		t.Errorf("protocol version %v", v)
 	}
-	if n := len(res[2]["result"].(map[string]any)["tools"].([]any)); n != 9 {
+	if n := len(res[2]["result"].(map[string]any)["tools"].([]any)); n != 12 {
 		t.Errorf("tools: %d", n)
 	}
 	if s, e := text(3); e || !strings.Contains(s, "web1\tstandard\tprod") {

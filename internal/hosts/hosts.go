@@ -28,6 +28,8 @@ type Host struct {
 	Description string   `toml:"description,omitempty" json:"description,omitempty"`
 	Allow       []string `toml:"allow,omitempty" json:"allow,omitempty"`
 	Deny        []string `toml:"deny,omitempty" json:"deny,omitempty"`
+	// Tunnels is the allow-list of host:port targets, as seen from the SSH server, an agent may ask to forward.
+	Tunnels []string `toml:"tunnels,omitempty" json:"tunnels,omitempty"`
 }
 
 func (h *Host) Addr() string {
@@ -71,6 +73,12 @@ func (h *Host) Validate() error {
 	}
 	if h.Profile != "" && !policy.ValidProfile(h.Profile) {
 		return fmt.Errorf("unknown profile %q (readonly|strict|standard|full)", h.Profile)
+	}
+	for _, t := range h.Tunnels {
+		host, port, err := net.SplitHostPort(t)
+		if n, perr := strconv.Atoi(port); err != nil || host == "" || perr != nil || n < 1 || n > 65535 {
+			return fmt.Errorf("bad tunnel target %q (want host:port, port 1-65535)", t)
+		}
 	}
 	return nil
 }

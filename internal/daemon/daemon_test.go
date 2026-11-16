@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/rpc"
 	"os"
@@ -62,6 +63,10 @@ func testServer(t *testing.T, clientKey ssh.PublicKey) (addr string, hostKey ssh
 				}
 				go ssh.DiscardRequests(reqs)
 				for nc := range chans {
+					if nc.ChannelType() == "direct-tcpip" {
+						go forwardChannel(nc)
+						continue
+					}
 					ch, creqs, _ := nc.Accept()
 					go serveSession(ch, creqs)
 				}
@@ -69,6 +74,20 @@ func testServer(t *testing.T, clientKey ssh.PublicKey) (addr string, hostKey ssh
 		}
 	}()
 	return ln.Addr().String(), signer.PublicKey()
+}
+
+// forwardChannel serves a direct-tcpip channel by dialing its target locally.
+func forwardChannel(nc ssh.NewChannel) {
+	p := nc.ExtraData()
+	hl := binary.BigEndian.Uint32(p)
+	up, err := net.Dial("tcp", net.JoinHostPort(string(p[4:4+hl]), strconv.Itoa(int(binary.BigEndian.Uint32(p[4+hl:])))))
+	if err != nil {
+		nc.Reject(ssh.ConnectionFailed, err.Error())
+		return
+	}
+	ch, _, _ := nc.Accept()
+	go func() { io.Copy(up, ch); up.Close() }()
+	go func() { io.Copy(ch, up); ch.Close() }()
 }
 
 // shell runs remote commands in the fake server (Git's sh on Windows).

@@ -312,7 +312,7 @@ func bash(cmd, cwd string, protected []string, explain Explainer) (string, strin
 				case "ask":
 					ask = fmt.Sprintf("command changes state on %s: %s", host, rcmd)
 				}
-			case sub == "job" || readOnlyUs[sub]:
+			case sub == "job" || sub == "tunnel" || readOnlyUs[sub]: // tunnel open always waits for the human in the daemon
 			default:
 				ours = false
 			}

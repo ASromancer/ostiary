@@ -371,6 +371,58 @@ def main():
         rc, out, _ = run("job", "tail", jid)
         check("running" not in out, "job kill", out)
 
+        # Approved port tunnel to a local echo server, as seen from sshd.
+        echo = socket.socket()
+        echo.bind(("127.0.0.1", 0))
+        echo.listen(5)
+        eaddr = f"127.0.0.1:{echo.getsockname()[1]}"
+
+        def echo_loop():
+            while True:
+                try:
+                    c, _ = echo.accept()
+                except OSError:
+                    return
+                def pump(c=c):
+                    while (b := c.recv(4096)):
+                        c.sendall(b)
+                    c.close()
+                threading.Thread(target=pump, daemon=True).start()
+
+        threading.Thread(target=echo_loop, daemon=True).start()
+        hp = f"{HOME}/.config/ostiary/hosts.toml"
+        cfg_text = open(hp).read()
+        open(hp, "w").write(cfg_text.replace("[hosts.e2e]\n", f'[hosts.e2e]\ntunnels = ["{eaddr}"]\n', 1))
+        rc, out = admin("reload")
+        check(rc == 0, "reload with tunnels", out)
+        rc, _, err = run("tunnel", "open", "e2e", "127.0.0.1:9")
+        check(rc == 100 and "not an allowed tunnel target" in err, "tunnel to an unlisted target is blocked", err)
+        agent = subprocess.Popen([BIN, "tunnel", "open", "e2e", eaddr, "--ttl", "5m"], env=ENV, stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        t = Tty("approve")
+        t.expect(r"DESTRUCTIVE")
+        t.expect(r"mở tunnel tới " + re.escape(eaddr))
+        code = last_code()
+        t.expect(r"\[y\] once")
+        t.send("y")
+        t.expect(r"approval code \(from the desktop notification\): ")
+        t.send(code)
+        t.expect("approved once")
+        out, err = agent.communicate(timeout=30)
+        mt = re.match(r"tunnel (\d+) (127\.0\.0\.1):(\d+) -> " + re.escape(eaddr) + r" via e2e until \d\d:\d\d\n", out)
+        check(agent.returncode == 0 and mt, "tunnel open after approval", out + err)
+        t.p.kill()
+        c = socket.create_connection(("127.0.0.1", int(mt.group(3))), 5)
+        c.sendall(b"tunnel-ping")
+        check(c.recv(64) == b"tunnel-ping", "echo through the tunnel")
+        rc, out, _ = run("tunnel", "list")
+        check(rc == 0 and f"tunnel {mt.group(1)} " in out, "tunnel list", out)
+        rc, out, _ = run("tunnel", "close", mt.group(1))
+        c.settimeout(5)
+        check(rc == 0 and c.recv(64) == b"", "tunnel close drops connections", out)
+        c.close()
+        echo.close()
+
         rc, out, _ = run("explain", "ls; sudo rm -rf /var/log/old", "--host", "e2e")
         check("level=destructive" in out and "action=approve" in out, "explain", out)
 
@@ -401,7 +453,7 @@ def main():
             return r["content"][0]["text"], r["isError"]
         init = rpc(1, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "e2e", "version": "0"}})
         mcp.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
-        check(init["result"]["serverInfo"]["name"] == "ostiary" and len(rpc(2, "tools/list")["result"]["tools"]) == 9,
+        check(init["result"]["serverInfo"]["name"] == "ostiary" and len(rpc(2, "tools/list")["result"]["tools"]) == 12,
               "mcp initialize + tools/list")
         text, err = tool(3, "run", host="e2e", command="echo via-mcp")
         check(not err and "level=read" in text and "via-mcp" in text, "mcp run read", text)

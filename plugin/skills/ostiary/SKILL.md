@@ -18,6 +18,9 @@ You never hold SSH keys. A local daemon runs commands for you, classifies each o
   Use this instead of running the command again.
 - `ostiary get <host>:<remote> <local>`, `ostiary put <local> <host>:<remote>` — copy files (50 MB max).
 - `ostiary job start <host> "<cmd>"`, `job tail <id> [--lines N]`, `job kill <id>` — long-running commands.
+- `ostiary tunnel open <host> <host:port> [--ttl 1h]` — forward a local port (printed, on 127.0.0.1) to a
+  target the user allow-listed on that host (e.g. a database). It always needs the user's approval.
+  `ostiary tunnel list`, `ostiary tunnel close <id>`. You still need your own DB credentials.
 - `ostiary explain "<cmd>" [--host <host>]` — see how a command is classified, without running it.
 
 ## Exit codes

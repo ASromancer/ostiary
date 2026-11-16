@@ -63,3 +63,16 @@ Host db
 		t.Fatalf("%+v", m)
 	}
 }
+
+func TestTunnelsValidate(t *testing.T) {
+	for _, ok := range []string{"127.0.0.1:5432", "db.internal:3306", "[::1]:80"} {
+		if err := (&Host{Host: "h", Tunnels: []string{ok}}).Validate(); err != nil {
+			t.Errorf("%s: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"db", "db:0", "db:65536", ":80", "db:x", ""} {
+		if err := (&Host{Host: "h", Tunnels: []string{bad}}).Validate(); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}

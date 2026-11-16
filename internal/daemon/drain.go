@@ -95,9 +95,6 @@ func (d *Daemon) Drain(ctx context.Context, force bool) {
 	}
 }
 
-// closeTunnels is the hook for Task 3: kill every open tunnel and log each one.
-func (d *Daemon) closeTunnels() {}
-
 // runningCounts feeds Status.Running.
 func (d *Daemon) runningCounts() (cmds, jobs, tunnels int) {
 	d.drainMu.Lock()
@@ -110,5 +107,5 @@ func (d *Daemon) runningCounts() (cmds, jobs, tunnels int) {
 			jobs++
 		}
 	}
-	return cmds, jobs, 0 // tunnels: Task 3
+	return cmds, jobs, len(d.tunnels)
 }
