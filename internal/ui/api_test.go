@@ -66,6 +66,15 @@ func TestAPIDecideAndAdmin(t *testing.T) {
 	if w := api(t, s, "POST", "/api/admin/begin", `{"op":"trust","name":"web1"}`); !strings.Contains(w.Body.String(), `"Ticket":77`) {
 		t.Fatalf("begin: %s", w.Body.String())
 	}
+	if w := api(t, s, "POST", "/api/admin/begin", `{"op":"telegram-pair","name":"","pass":"tok"}`); !strings.Contains(w.Body.String(), "info:telegram-pair:tok") {
+		t.Fatalf("telegram begin must carry the token: %s", w.Body.String())
+	}
+	if w := api(t, s, "POST", "/api/admin/begin", `{"op":"trust","name":"web1","pass":"tok"}`); strings.Contains(w.Body.String(), "tok") {
+		t.Fatalf("other ops must ignore pass: %s", w.Body.String())
+	}
+	if w := api(t, s, "GET", "/api/telegram", ""); !strings.Contains(w.Body.String(), `"Bot":"ostiary_bot"`) {
+		t.Fatalf("telegram: %s", w.Body.String())
+	}
 	w := api(t, s, "POST", "/api/admin/commit", `{"ticket":77,"op":"host-set","name":"web2","host":{"host":"10.0.0.9","user":"root","agent":true}}`)
 	if w.Code != 200 || len(f.admin) != 1 || f.admin[0].Host == nil || f.admin[0].Host.Host != "10.0.0.9" || f.admin[0].Ticket != 77 {
 		t.Fatalf("commit host: %d %s %+v", w.Code, w.Body.String(), f.admin)

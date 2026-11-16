@@ -523,7 +523,7 @@ function noreqWarn() {
   w.append(icon("alert"), el("div", null, k === "missing" ? "Chưa có vault: mọi lệnh của agent đang bị từ chối cho tới khi bạn tạo vault." : "Vault đang khóa: mọi lệnh của agent đang bị từ chối cho tới khi bạn mở khóa."), b);
 }
 // Vault-backed admin ops start nothing while the vault is locked or missing (the daemon refuses them too).
-const VAULT_OPS = new Set(["host-set", "host-rm", "reload", "key-gen", "key-import", "key-rm", "key-export"]);
+const VAULT_OPS = new Set(["host-set", "host-rm", "reload", "key-gen", "key-import", "key-rm", "key-export", "telegram-pair", "telegram-unpair", "telegram-settings"]);
 async function needVault() {
   if (!status || (!status.Locked && !status.VaultMissing)) return true;
   const miss = !!status.VaultMissing;
@@ -808,7 +808,10 @@ async function confirmTrust(name, info) {
 async function admin(op, name, extra) {
   if (VAULT_OPS.has(op) && !(await needVault())) return null;
   if (op === "reload" && !(await confirmReload())) return null;
-  const b = await call("POST", "/api/admin/begin", { op, name });
+  // The Telegram bot token travels at begin (the daemon shows the bot name for the human to confirm) and never in commit.
+  const { beginPass, ...rest } = extra || {};
+  extra = rest;
+  const b = await call("POST", "/api/admin/begin", beginPass ? { op, name, pass: beginPass } : { op, name });
   let code = "";
   if (op === "trust" && b.Info) {
     if (!(await confirmTrust(name, b.Info))) return null;
@@ -1197,6 +1200,7 @@ async function loadKeychain() {
     $("pwlist").replaceChildren(emptyLine("Chưa có vault, nên chưa lưu mật khẩu nào."));
     return;
   }
+  loadTelegram().catch(() => {});
   hero.className = "card vault-hero " + (status.Locked ? "locked" : "open");
   const big = el("div", "big");
   big.appendChild(icon(status.Locked ? "lock" : "unlock"));
@@ -1344,6 +1348,93 @@ async function savePassword() {
     const o = await admin("key-import", v.name.trim(), { password: v.pw });
     if (o) { ok(o); loadKeychain().catch(fail); afterKeyAction(); }
   } catch (e) { fail(e); }
+}
+
+// ---- telegram ----
+let tgCode = "", tgBot = "", tgTimer = null;
+const tgStop = () => { if (tgTimer) { clearInterval(tgTimer); tgTimer = null; } };
+async function loadTelegram() {
+  const box = $("tgcard");
+  const hide = !!(status && status.VaultMissing);
+  box.classList.toggle("hidden", hide);
+  box.previousElementSibling.classList.toggle("hidden", hide);
+  if (hide) return;
+  const t = await call("GET", "/api/telegram");
+  if (!t.Pairing) { tgCode = ""; tgStop(); } else if (!tgTimer) tgTimer = setInterval(() => { if (view === "keychain") loadTelegram().catch(() => {}); else tgStop(); }, 2000);
+  if (t.Paired) tgBot = t.Bot;
+  box.replaceChildren(...tgNodes(t));
+}
+function tgNodes(t) {
+  const out = [];
+  const err = t.LastError ? el("p", "tgerr", friendlyError(t.LastError)) : null;
+  const privacy = el("p", "hint", "Nội dung lệnh, tên host và agent sẽ đi qua máy chủ Telegram.");
+  if (t.Paired) {
+    const head = el("div", "tghead");
+    head.append(el("b", null, "@" + t.Bot.replace(/^@/, "")), el("span", "pill ok", "đã kết nối" + (t.User ? " · @" + t.User.replace(/^@/, "") : "")));
+    const sw = el("label", "switch");
+    const cb = el("input");
+    cb.type = "checkbox"; cb.checked = !!t.AllowDestructive;
+    cb.setAttribute("role", "switch");
+    cb.addEventListener("change", async () => {
+      const want = cb.checked;
+      cb.disabled = true;
+      try {
+        const o = await admin("telegram-settings", want ? "destructive-on" : "destructive-off");
+        if (o === null) cb.checked = !want; else if (o) ok(o);
+      } catch (e) { cb.checked = !want; fail(e); }
+      loadTelegram().catch(fail);
+    });
+    sw.append(cb, el("span", "track"), el("span", null, "Cho phép duyệt lệnh phá hủy qua Telegram"));
+    const un = button("Ngắt kết nối", "danger");
+    un.addEventListener("click", () => busy(un, async () => {
+      if (!(await confirmBox("Ngắt kết nối Telegram?", "Ostiary sẽ xóa token và liên kết tài khoản; yêu cầu duyệt sẽ không còn gửi qua Telegram.", { ok: "Ngắt kết nối", danger: true }))) return;
+      const o = await admin("telegram-unpair", "");
+      if (o) ok(o);
+      loadTelegram().catch(fail);
+    }));
+    const act = el("div", "tgact");
+    act.appendChild(un);
+    out.push(head, sw, el("p", "hint", "Khi tắt, lệnh phá hủy và tunnel chỉ được thông báo, không có nút duyệt trên Telegram."), privacy);
+    if (err) out.push(err);
+    out.push(act);
+    return out;
+  }
+  if (t.Pairing) {
+    out.push(el("p", null, "Đang chờ ghép nối" + (tgBot ? " với " + tgBot : "") + "…"));
+    if (tgCode) {
+      out.push(el("div", "tgcode", tgCode.replace(/^(\d{3})(\d+)$/, "$1 $2")),
+        el("p", null, "Gửi /pair " + tgCode + " cho " + (tgBot || "bot") + " (chat riêng). Mã có hiệu lực 10 phút."));
+    } else out.push(el("p", "hint", "Mã ghép nối chỉ hiện một lần. Nếu đã mất, hãy ngắt kết nối rồi bắt đầu lại."));
+    out.push(privacy);
+    if (err) out.push(err);
+    return out;
+  }
+  out.push(el("p", null, "Duyệt lệnh ngay trên điện thoại. Làm theo 3 bước:"));
+  const ol = el("ol", "tgsteps");
+  ["Mở @BotFather trong Telegram", "Gõ /newbot và làm theo hướng dẫn", "Dán token bot vào ô bên dưới"].forEach((s) => ol.appendChild(el("li", null, s)));
+  out.push(ol);
+  const inp = el("input", "input mono");
+  inp.type = "password"; inp.autocomplete = "off"; inp.spellcheck = false; inp.placeholder = "123456789:AA…";
+  inp.setAttribute("aria-label", "Token bot Telegram");
+  const go = button("Kết nối", "primary");
+  const row = el("div", "tgrow");
+  row.append(inp, go);
+  const submit = () => busy(go, async () => {
+    const token = inp.value.trim();
+    if (!token) { inp.focus(); return; }
+    inp.value = "";
+    const o = await admin("telegram-pair", "", { beginPass: token });
+    if (o) {
+      const m = /^(\S+)\s+(\d{6})$/.exec(o);
+      if (m) { tgBot = m[1]; tgCode = m[2]; } else ok(o);
+    }
+    loadTelegram().catch(fail);
+  });
+  go.addEventListener("click", submit);
+  inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } });
+  out.push(row, privacy);
+  if (err) out.push(err);
+  return out;
 }
 
 // ---- known hosts ----

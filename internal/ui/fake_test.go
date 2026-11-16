@@ -46,7 +46,7 @@ func (f *fakeBackend) HostList() (daemon.HostListReply, error) {
 		Trusted: map[string]bool{"web1": true}}, nil
 }
 func (f *fakeBackend) Begin(a daemon.BeginArgs) (daemon.BeginReply, error) {
-	return daemon.BeginReply{Ticket: 77, OSAuth: true, Info: "info:" + a.Op}, nil
+	return daemon.BeginReply{Ticket: 77, OSAuth: true, Info: "info:" + a.Op + ":" + string(a.Pass)}, nil
 }
 func (f *fakeBackend) Admin(a daemon.AdminArgs) (daemon.AdminReply, error) {
 	f.mu.Lock()

@@ -32,7 +32,7 @@ func TestStaticPage(t *testing.T) {
 	}
 	js := get("/app.js")
 	for _, want := range []string{"/api/pending", "/api/decide", "/api/admin/begin", "/api/admin/commit", "/api/audit", "/api/hosts",
-		"/api/keys", "/api/knownhosts", "/api/unlock", "/api/lock", "/api/doctor", "/api/setup", "/api/setup/skip", "/api/out/", "/events"} {
+		"/api/keys", "/api/knownhosts", "/api/unlock", "/api/lock", "/api/doctor", "/api/telegram", "/api/setup", "/api/setup/skip", "/api/out/", "/events"} {
 		if !strings.Contains(js, want) {
 			t.Errorf("app.js lacks %s", want)
 		}
