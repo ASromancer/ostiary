@@ -435,6 +435,7 @@ def main():
         # Config edited behind the daemon's back.
         with open(f"{HOME}/.config/ostiary/hosts.toml", "a") as f:
             f.write('\n[hosts.sneaky]\nhost = "1.2.3.4"\nagent = true\n')
+            f.write('\n[hosts.strictbox]\nhost = "1.2.3.5"\nagent = true\nprofile = "strict"\n')
         run("lock")
         t = Tty("unlock")
         t.expect("vault passphrase: ")
@@ -445,6 +446,10 @@ def main():
         rc, out = admin("reload")
         rc2, _, _ = run("run", "e2e", "echo hi")
         check(rc == 0 and rc2 == 0, "reload with code accepts the config again", out)
+        rc, out, _ = run("explain", "touch /tmp/x", "--host", "strictbox")
+        rc2, out2, _ = run("explain", "touch /tmp/x", "--host", "e2e")
+        check("level=mutate" in out and "action=approve" in out and "action=ask" in out2,
+              "strict profile: mutate needs approval (standard only asks)", out + out2)
 
         t = Tty("key", "export", "e2e")
         t.expect(r"approval code \(from the desktop notification\): ")

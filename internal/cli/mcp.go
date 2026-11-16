@@ -169,7 +169,7 @@ func tool(name, title, desc string, schema map[string]any, readOnly, destructive
 }
 
 var mcpTools = []any{
-	tool("hosts", "List hosts", "Hosts you may use, with their profile (readonly|standard|full) and description.",
+	tool("hosts", "List hosts", "Hosts you may use, with their profile (readonly|strict|standard|full) and description.",
 		obj(map[string]any{}), true, false),
 	tool("run", "Run a command", "Run one shell command on a host. Output keeps the first and last 40 lines; use the output tool for the rest. "+
 		"If approval is needed the result says so: call run again with the same host, command and approval_id.",

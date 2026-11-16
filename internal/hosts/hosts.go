@@ -70,7 +70,7 @@ func (h *Host) Validate() error {
 		return errors.New("missing host")
 	}
 	if h.Profile != "" && !policy.ValidProfile(h.Profile) {
-		return fmt.Errorf("unknown profile %q (readonly|standard|full)", h.Profile)
+		return fmt.Errorf("unknown profile %q (readonly|strict|standard|full)", h.Profile)
 	}
 	return nil
 }

@@ -130,11 +130,12 @@ func (e *Engine) lookup(line string) (Level, string, bool) {
 // Profiles, from most to least restrictive.
 const (
 	ProfileReadonly = "readonly"
+	ProfileStrict   = "strict"
 	ProfileStandard = "standard"
 	ProfileFull     = "full"
 )
 
-var profileRank = map[string]int{ProfileReadonly: 0, ProfileStandard: 1, ProfileFull: 2}
+var profileRank = map[string]int{ProfileReadonly: 0, ProfileStrict: 1, ProfileStandard: 2, ProfileFull: 3}
 
 func ValidProfile(p string) bool { _, ok := profileRank[p]; return ok }
 
@@ -170,6 +171,8 @@ func Decide(l Level, profile string) Action {
 	case profile == ProfileReadonly:
 		return Block
 	case l == Destructive:
+		return Approve
+	case profile == ProfileStrict:
 		return Approve
 	case profile == ProfileFull:
 		return Run

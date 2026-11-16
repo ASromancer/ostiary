@@ -59,6 +59,13 @@ func cmdDaemon(args []string) int {
 		}
 		log.SetOutput(f)
 	}
+	var wait time.Duration
+	if *afterPid != 0 {
+		wait = 10 * time.Second // the successor waits for the old daemon to let go of the lock
+	}
+	if err := daemon.AcquireLock(wait); err != nil {
+		return errf(1, "%v", err)
+	}
 	if *afterPid != 0 {
 		daemon.WaitForPredecessor()
 	}

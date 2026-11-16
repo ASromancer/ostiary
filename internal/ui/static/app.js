@@ -129,7 +129,7 @@ const ERR_RULES = [
   [/^parse key:|passphrase protected|^x509:/, "File không phải private key hợp lệ (OpenSSH/PEM)."],
   [/^nothing to import/, "Chưa có nội dung để lưu."],
   [/^unknown key "(.*)"/, "Không tìm thấy key $1."],
-  [/^unknown profile "(.*?)"/, "Profile \"$1\" không hợp lệ (readonly, standard hoặc full)."],
+  [/^unknown profile "(.*?)"/, "Profile \"$1\" không hợp lệ (readonly, strict, standard hoặc full)."],
   [/^(missing host|host or key missing)/, "Thiếu địa chỉ host hoặc key."],
   [/^bad request/, "Yêu cầu không hợp lệ."],
   [/^vault: wrong master key or passphrase/, "Sai passphrase."],
@@ -1013,7 +1013,7 @@ async function openHostDrawer(name, h) {
   prof.setAttribute("role", "radiogroup");
   prof.setAttribute("aria-label", "Mức quyền");
   const cur = (h && h.profile) || "standard";
-  ["readonly", "standard", "full"].forEach((p) => {
+  ["readonly", "strict", "standard", "full"].forEach((p) => {
     const l = el("label");
     const r = el("input");
     r.type = "radio"; r.name = "profile"; r.value = p; r.checked = p === cur;
@@ -1021,7 +1021,7 @@ async function openHostDrawer(name, h) {
     prof.appendChild(l);
   });
   const fProf = el("div", "field");
-  fProf.append(el("div", "lab", "Mức quyền"), prof, el("div", "hint", "readonly chỉ đọc; standard cho lệnh thông thường; full gần như không giới hạn (vẫn qua duyệt)."));
+  fProf.append(el("div", "lab", "Mức quyền"), prof, el("div", "hint", "readonly chỉ đọc; strict: mọi lệnh thay đổi đều phải duyệt; standard cho lệnh thông thường; full gần như không giới hạn (vẫn qua duyệt)."));
 
   const sw = el("label", "switch");
   const cb = el("input");

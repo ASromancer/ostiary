@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
 	"github.com/ASromancer/ostiary/internal/audit"
+	"github.com/ASromancer/ostiary/internal/paths"
 	"github.com/ASromancer/ostiary/internal/update"
 )
 
@@ -138,7 +140,30 @@ func (d *Daemon) restart(delay time.Duration) error {
 	return nil
 }
 
-// WaitForPredecessor blocks until the old daemon has released the socket (at most 10 s).
+var held func()
+
+// ErrLocked means another daemon holds state/daemon.lock.
+var ErrLocked = errors.New("daemon already running")
+
+// AcquireLock takes the single-daemon lock for the life of the process. A successor passes
+// wait (10 s) so the old daemon can finish exiting; everyone else passes 0 and fails fast.
+func AcquireLock(wait time.Duration) error {
+	os.MkdirAll(paths.State(), 0o700)
+	p := filepath.Join(paths.State(), "daemon.lock")
+	for end := time.Now().Add(wait); ; time.Sleep(100 * time.Millisecond) {
+		rel, err := acquireLock(p)
+		if err == nil {
+			held = rel // keep the file referenced: its finalizer would drop the lock
+			return nil
+		}
+		if !errors.Is(err, ErrLocked) || time.Now().After(end) {
+			return err
+		}
+	}
+}
+
+// WaitForPredecessor also waits for the socket to go quiet (at most 10 s): a predecessor
+// from before the lock existed does not hold it.
 func WaitForPredecessor() {
 	for i := 0; i < 100 && Running(); i++ {
 		time.Sleep(100 * time.Millisecond)

@@ -139,8 +139,11 @@ Agents that have a shell work better with the CLI and skill: no tool schemas sit
 | Profile | read | mutate | destructive | forbidden |
 |---|---|---|---|---|
 | `readonly` | run | block | block | block |
+| `strict` | run | approval via daemon, for every agent | approval via daemon | block |
 | `standard` (default) | run | agent hook asks you | approval via daemon | block |
 | `full` | run | run | approval via daemon | block |
+
+Only one daemon runs per user: it holds an exclusive lock on `state/daemon.lock`, and a second `ostiary daemon` exits with "daemon already running".
 
 Per host in `~/.config/ostiary/hosts.toml`:
 
