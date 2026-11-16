@@ -18,6 +18,8 @@ type fakeBackend struct {
 	failAll bool
 	setup   daemon.SetupReply
 	skipped *bool
+	tunnels []daemon.TunnelInfo
+	closed  []int
 }
 
 func (f *fakeBackend) Status() (daemon.StatusReply, error) {
@@ -74,5 +76,16 @@ func (f *fakeBackend) SetupSkip(skip bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.skipped = &skip
+	return nil
+}
+func (f *fakeBackend) Tunnels() ([]daemon.TunnelInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]daemon.TunnelInfo{}, f.tunnels...), nil
+}
+func (f *fakeBackend) TunnelClose(id int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.closed = append(f.closed, id)
 	return nil
 }

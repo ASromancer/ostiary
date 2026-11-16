@@ -45,6 +45,7 @@ const ICONS = {
   ban: ["M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z", "M4.9 4.9l14.2 14.2"],
   chevl: ["M15 18l-6-6 6-6"],
   chevr: ["M9 18l6-6-6-6"],
+  tunnel: ["M8 3L4 7l4 4", "M4 7h16", "M16 21l4-4-4-4", "M20 17H4"],
   upload: ["M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4", "M17 8l-5-5-5 5", "M12 3v12"],
 };
 const SVGNS = "http://www.w3.org/2000/svg";
@@ -629,6 +630,11 @@ function buildCard(r) {
   cmdbox.appendChild(copyBtn(r.cmd, "Sao chép lệnh"));
   body.appendChild(cmdbox);
 
+  if (r.kind === "tunnel") {
+    const tn = el("div", "tunnelnote");
+    tn.append(icon("tunnel"), el("span", null, "Mở cổng local trên máy này, chuyển tiếp qua SSH. Trong lúc tunnel mở, mọi tiến trình trên máy này đều kết nối được tới cổng đó."));
+    body.appendChild(tn);
+  }
   const why = (r.reasons || []).filter((x) => x.level !== "read");
   if (why.length) {
     const ul = el("ul", "reasons");
@@ -700,7 +706,7 @@ function buildCard(r) {
   };
   actions.append(mk("Duyệt 1 lần", "primary lg", "y", "check"));
   // The daemon's "s" covers only this exact command on this host for 30 minutes; it refuses it for destructive.
-  const sticky = r.level === "destructive" || r.level === "forbidden" ? null : mk("Cho phép lệnh này 30 phút", "", "s");
+  const sticky = r.kind === "tunnel" || r.level === "destructive" || r.level === "forbidden" ? null : mk("Cho phép lệnh này 30 phút", "", "s");
   if (sticky) {
     sticky.title = "Chỉ đúng lệnh này, trên host này, trong 30 phút. Lệnh khác vẫn phải duyệt.";
     actions.appendChild(sticky);
@@ -963,7 +969,69 @@ function renderHosts() {
 async function loadHosts() {
   hostData = await call("GET", "/api/hosts");
   renderHosts();
+  loadTunnels().catch(fail);
 }
+
+// ---- open tunnels (Host view) ----
+let tunnelList = [];
+function fmtBytes(n) {
+  if (n < 1024) return n + " B";
+  const u = ["KB", "MB", "GB", "TB"];
+  let i = -1;
+  do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
+  return n.toFixed(n < 10 ? 1 : 0) + " " + u[i];
+}
+function fmtLeft(until) {
+  const s = Math.max(0, Math.round((new Date(until) - Date.now()) / 1000));
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
+  return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(x).padStart(2, "0");
+}
+async function loadTunnels() {
+  tunnelList = await call("GET", "/api/tunnels");
+  const box = $("tunnelbox");
+  box.replaceChildren();
+  box.classList.toggle("hidden", !tunnelList.length);
+  if (!tunnelList.length) return;
+  const head = el("div", "section-head");
+  head.appendChild(el("h2", null, "Tunnel đang mở"));
+  head.appendChild(el("span", "pill neutral", tunnelList.length));
+  box.appendChild(head);
+  const note = el("div", "tunnelnote");
+  note.append(icon("alert"), el("span", null, "Trong lúc tunnel mở, mọi tiến trình trên máy này đều kết nối được tới cổng local."));
+  box.appendChild(note);
+  const list = el("div", "rows-list");
+  tunnelList.forEach((t) => {
+    const row = el("div", "card tunnelrow");
+    const main = el("div", "tmain");
+    const path = el("div", "tpath");
+    path.append(icon("tunnel"), el("b", null, t.Host), el("span", "muted", "→"), el("code", null, t.Target));
+    const local = el("div", "tlocal");
+    local.append(el("span", "muted", "Cổng local"), el("code", null, t.Local), copyBtn(t.Local, "Sao chép " + t.Local));
+    main.append(path, local);
+    const stat = el("div", "tstat");
+    const left = el("span", "pill accent");
+    left._until = t.Until;
+    left.textContent = "còn " + fmtLeft(t.Until);
+    stat.append(left, el("span", "muted", "↓ " + fmtBytes(t.BytesIn || 0) + " · ↑ " + fmtBytes(t.BytesOut || 0) + " · " + (t.Conns || 0) + " kết nối"));
+    const close = button("Đóng", "danger", "x");
+    close.addEventListener("click", async () => {
+      if (!(await confirmBox("Đóng tunnel #" + t.ID + "?", "Các kết nối đang chạy qua " + t.Local + " sẽ bị ngắt.", { ok: "Đóng tunnel", danger: true }))) return;
+      busy(close, async () => { await call("POST", "/api/tunnels/" + t.ID + "/close", {}); ok("Đã đóng tunnel #" + t.ID); await loadTunnels(); });
+    });
+    row.append(main, stat, close);
+    list.appendChild(row);
+  });
+  box.appendChild(list);
+}
+setInterval(() => {
+  let expired = false;
+  document.querySelectorAll("#tunnelbox .pill.accent").forEach((p) => {
+    if (!p._until) return;
+    p.textContent = "còn " + fmtLeft(p._until);
+    if (new Date(p._until) <= Date.now()) expired = true;
+  });
+  if (expired && view === "hosts") loadTunnels().catch(() => {});
+}, 1000);
 
 function chipInput(initial, placeholder, label) {
   const wrap = el("div", "chips");
@@ -1053,7 +1121,14 @@ async function openHostDrawer(name, h) {
   const fAllow = el("div", "field"); fAllow.append(el("div", "lab", "Allow"), allow.node, el("div", "hint", "Lệnh khớp pattern được chạy không cần hỏi (nếu profile cho phép)."));
   const fDeny = el("div", "field"); fDeny.append(el("div", "lab", "Deny"), deny.node, el("div", "hint", "Lệnh khớp pattern bị chặn."));
 
-  form.append(fName, row, fUser, fKey, fProf, fAgent, fDesc, fAllow, fDeny);
+  const tunnels = chipInput(h && h.tunnels, "host:port rồi Enter, vd 127.0.0.1:5432", "Cho phép tunnel tới");
+  const fTun = field("Cho phép tunnel tới (host:port nhìn từ server)", tunnels.node, "Để trống = không cho tunnel. Mỗi lần mở tunnel agent vẫn phải được bạn duyệt.");
+  const badTunnel = (v) => {
+    const i = v.lastIndexOf(":");
+    const host = v.slice(0, i), port = v.slice(i + 1);
+    return i < 1 || !/^[A-Za-z0-9._:\[\]-]+$/.test(host) || !/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65535;
+  };
+  form.append(fName, row, fUser, fKey, fProf, fAgent, fDesc, fAllow, fDeny, fTun);
   layer.body.appendChild(form);
   let dirty = false;
   ["input", "change"].forEach((t) => form.addEventListener(t, () => { dirty = true; }));
@@ -1077,11 +1152,14 @@ async function openHostDrawer(name, h) {
     need(fHost, iHost, !iHost.value.trim(), "Nhập địa chỉ");
     const port = Number(iPort.value);
     need(fPort, iPort, !(Number.isInteger(port) && port >= 1 && port <= 65535), "Port 1–65535");
+    const badT = tunnels.get().filter(badTunnel);
+    setErr(fTun, badT.length ? "Không đúng dạng host:port (port 1–65535): " + badT.join(", ") : "");
+    if (badT.length) bad = bad || tunnels.input;
     if (bad) { bad.focus(); return; }
     const host = {
       host: iHost.value.trim(), port, user: iUser.value.trim(), key: sel.value,
       profile: (prof.querySelector("input:checked") || {}).value || "standard", agent: cb.checked,
-      description: iDesc.value.trim(), allow: allow.get(), deny: deny.get(),
+      description: iDesc.value.trim(), allow: allow.get(), deny: deny.get(), tunnels: tunnels.get(),
     };
     busy(save, async () => {
       const o = await admin("host-set", iName.value.trim(), { host });

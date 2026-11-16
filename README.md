@@ -119,6 +119,7 @@ tunnel 7 127.0.0.1:41873 -> 127.0.0.1:5432 via db1 until 15:42
 - Opening a tunnel always needs your approval (OS dialog, code or the UI), at level `destructive`; there is no 30-minute option. A target that is not in `tunnels` is refused with exit code 100 before any approval is asked.
 - The default lifetime is 1 hour, the maximum 8 hours. A tunnel closes on `ostiary tunnel close <id>`, when the TTL ends, or when the daemon stops or restarts. The audit log records the open and the close (reason, bytes in and out, connections). MCP has `tunnel_open`, `tunnel_list` and `tunnel_close`.
 - The TTL minimum is 1 minute. Each tunnel forwards at most 32 connections at once; dialing the target times out after 10 s. Any agent can list and close any tunnel (`tunnel list` is not scoped to its repo).
+- In the web UI, the Host page lists open tunnels (local port with a copy button, time left, traffic) with a confirmed "Đóng" button, and the host drawer has a "Cho phép tunnel tới" field for the allow-list. Tunnel approval cards have their own icon and no 30-minute option.
 - Known limit: while a tunnel is open, any local process of any user can connect to its loopback port. The TTL keeps that window short.
 - A tunnel is a network path only. Ostiary does not handle database passwords; the agent still needs credentials, and we recommend a read-only database user.
 

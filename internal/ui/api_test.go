@@ -277,3 +277,23 @@ func TestReadKnownHostsLimits(t *testing.T) {
 		t.Fatalf("cap: got %d entries", len(got))
 	}
 }
+
+func TestAPITunnels(t *testing.T) {
+	f := &fakeBackend{tunnels: []daemon.TunnelInfo{{ID: 7, Host: "web1", Target: "127.0.0.1:5432", Local: "127.0.0.1:41873"}}}
+	s := newServer(Options{Backend: f, Version: "9.9"}, 8123)
+	if w := api(t, s, "GET", "/api/tunnels", ""); w.Code != 200 || !strings.Contains(w.Body.String(), `"Local":"127.0.0.1:41873"`) {
+		t.Fatalf("list: %d %s", w.Code, w.Body.String())
+	}
+	if w := api(t, s, "POST", "/api/tunnels/7/close", "{}"); w.Code != 200 || len(f.closed) != 1 || f.closed[0] != 7 {
+		t.Fatalf("close: %d %v", w.Code, f.closed)
+	}
+	if w := do(t, s, "POST", "/api/tunnels/7/close", apiHost, apiOrigin, "", "application/json", "{}"); w.Code != 401 {
+		t.Fatalf("no cookie: %d", w.Code)
+	}
+	if w := do(t, s, "POST", "/api/tunnels/7/close", apiHost, "", session(t, s), "application/json", "{}"); w.Code != 403 {
+		t.Fatalf("no origin: %d", w.Code)
+	}
+	if len(f.closed) != 1 {
+		t.Fatalf("guarded calls reached the backend: %v", f.closed)
+	}
+}

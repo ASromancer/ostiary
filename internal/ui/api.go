@@ -128,6 +128,29 @@ func (s *Server) routes(mux *http.ServeMux) {
 		}
 		writeJSON(w, map[string]string{"out": rep.Out})
 	})
+	mux.HandleFunc("GET /api/tunnels", func(w http.ResponseWriter, r *http.Request) {
+		t, err := b.Tunnels()
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		if t == nil {
+			t = []daemon.TunnelInfo{}
+		}
+		writeJSON(w, t)
+	})
+	mux.HandleFunc("POST /api/tunnels/{id}/close", func(w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.Atoi(r.PathValue("id"))
+		if err != nil || id <= 0 {
+			fail(w, errors.New("bad id"))
+			return
+		}
+		if err := b.TunnelClose(id); err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, struct{}{})
+	})
 	mux.HandleFunc("GET /api/setup", func(w http.ResponseWriter, r *http.Request) {
 		rep, err := b.Setup()
 		if err != nil {

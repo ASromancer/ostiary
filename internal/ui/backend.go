@@ -20,6 +20,8 @@ type Backend interface {
 	Keys() ([]string, error)
 	Setup() (daemon.SetupReply, error)
 	SetupSkip(skip bool) error
+	Tunnels() ([]daemon.TunnelInfo, error)
+	TunnelClose(id int) error
 }
 
 type ServiceBackend struct{ S *daemon.Service }
@@ -60,4 +62,11 @@ func (b ServiceBackend) Setup() (r daemon.SetupReply, err error) {
 }
 func (b ServiceBackend) SetupSkip(skip bool) error {
 	return b.S.SetupSkip(&daemon.SetupSkipArgs{Skip: skip}, &daemon.Empty{})
+}
+func (b ServiceBackend) Tunnels() (r []daemon.TunnelInfo, err error) {
+	err = b.S.TunnelList(&daemon.Empty{}, &r)
+	return
+}
+func (b ServiceBackend) TunnelClose(id int) error {
+	return b.S.TunnelClose(&daemon.TunnelArgs{ID: id}, &daemon.Empty{})
 }
