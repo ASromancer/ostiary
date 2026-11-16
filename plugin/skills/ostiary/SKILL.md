@@ -28,6 +28,9 @@ You never hold SSH keys. A local daemon runs commands for you, classifies each o
 - `102` the daemon is not running or the vault is locked. If you run inside a sandbox (Codex), the
   sandbox may be what blocks ostiary's local socket: re-run the same ostiary command outside the
   sandbox (escalated) before asking the user.
+- `103` ostiary is restarting (stop, upgrade). The CLI already waits 10 s and retries once; if you
+  still get 103, wait about 10 seconds and retry the same command once, then ask the user. A pending
+  approval cancelled by a restart ends with 101: ask the user before retrying.
 - Only errors produced by ostiary itself print a stderr line starting with `ostiary:`.
 
 ## Rules

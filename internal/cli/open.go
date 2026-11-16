@@ -104,6 +104,11 @@ func cmdOpen(args []string) int {
 }
 
 func cmdStop(args []string) int {
+	fs := newFlags("stop")
+	now := fs.Bool("now", false, "do not wait for running commands")
+	if _, err := parse(fs, args); err != nil {
+		return 2
+	}
 	if !daemon.Running() {
 		fmt.Println("daemon is not running")
 		return 0
@@ -113,10 +118,10 @@ func cmdStop(args []string) int {
 		return code
 	}
 	defer c.Close()
-	if err := c.Call("A.Shutdown", &daemon.Empty{}, &daemon.Empty{}); err != nil {
+	if err := c.Call("A.Shutdown", &daemon.ShutdownArgs{Force: *now}, &daemon.Empty{}); err != nil {
 		return callErr(err)
 	}
-	for i := 0; i < 50 && daemon.Running(); i++ {
+	for i := 0; i < 700 && daemon.Running(); i++ { // a drain waits up to 60 s
 		time.Sleep(100 * time.Millisecond)
 	}
 	fmt.Println("daemon stopped")

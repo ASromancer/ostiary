@@ -224,7 +224,7 @@ func (d *Daemon) admin(a *AdminArgs, data any, r *AdminReply) error {
 		r.Out = "installed the Ostiary hook for " + a.Name
 		return nil
 	case "upgrade":
-		return d.upgrade(a.Name, r)
+		return d.upgrade(a.Name, a.Force, r)
 	case "autostart":
 		if d.setup.SetAutostart == nil {
 			return errors.New("autostart is not available in this daemon")

@@ -13,9 +13,10 @@ import (
 
 // ostiary-specific exit codes (spec 6.1).
 const (
-	CodeBlocked  = 100 // forbidden, profile does not allow, host not allowed
-	CodeDenied   = 101 // denied or approval timed out
-	CodeNoDaemon = 102 // daemon not running or vault locked
+	CodeBlocked    = 100 // forbidden, profile does not allow, host not allowed
+	CodeDenied     = 101 // denied or approval timed out
+	CodeNoDaemon   = 102 // daemon not running or vault locked
+	CodeRestarting = 103 // draining for a stop, restart or upgrade; retry once shortly
 )
 
 // AgentClaude is the Env.Agent value for Claude Code, the only agent whose
@@ -30,6 +31,12 @@ type Env struct {
 }
 
 type Empty struct{}
+
+// ShutdownArgs is for Shutdown and Restart. An empty {} means Force=false.
+type ShutdownArgs struct{ Force bool }
+
+// RunningInfo is the work a restart would interrupt.
+type RunningInfo struct{ Commands, Jobs, Tunnels int }
 
 type HostInfo struct {
 	Name        string `json:"name"`
@@ -93,6 +100,7 @@ type StatusReply struct {
 	AuthNote                                   string      // why OS authentication is unavailable
 	UI                                         string      // base URL of the web UI, "" when it is not running
 	Update                                     *UpdateInfo // a newer release, nil when up to date or unchecked
+	Running                                    RunningInfo
 }
 
 type UILoginReply struct{ URL string }
@@ -121,6 +129,7 @@ type AdminArgs struct {
 	PEM      []byte
 	Password []byte
 	Pass     []byte // vault passphrase for init (never logged)
+	Force    bool   // upgrade: restart without waiting for running commands
 }
 
 type AdminReply struct{ Out string }

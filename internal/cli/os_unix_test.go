@@ -8,7 +8,7 @@ import "testing"
 // the graphical session, not at default.target before the display exists.
 func TestSystemdUnit(t *testing.T) {
 	want := "[Unit]\nDescription=ostiary daemon\nAfter=graphical-session.target\nPartOf=graphical-session.target\n\n" +
-		"[Service]\nExecStart=/opt/ostiary daemon\nRestart=on-failure\n\n" +
+		"[Service]\nExecStart=/opt/ostiary daemon\nRestart=on-failure\nTimeoutStopSec=75\n\n" +
 		"[Install]\nWantedBy=graphical-session.target\n"
 	if got := systemdUnit("/opt/ostiary"); got != want {
 		t.Errorf("got:\n%s\nwant:\n%s", got, want)

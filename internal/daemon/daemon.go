@@ -71,6 +71,14 @@ type Daemon struct {
 	restartCode atomic.Int32
 	managedFn   func() bool // tests only
 	restarting  atomic.Bool // a successor takes over the socket: do not remove it
+
+	drainMu   sync.Mutex // guards draining and running
+	draining  bool
+	running   int // commands executing over SSH
+	inflight  sync.WaitGroup
+	forceCh   chan struct{} // closed when a drain must not wait any longer
+	forceOnce sync.Once
+	drained   chan struct{} // closed when Drain has finished
 }
 
 func New(notify func(approval.Notice) error, approvalTimeout time.Duration) (*Daemon, error) {
@@ -80,7 +88,8 @@ func New(notify func(approval.Notice) error, approvalTimeout time.Duration) (*Da
 		}
 	}
 	d := &Daemon{
-		jobs: map[int]*sshconn.Job{},
+		jobs:    map[int]*sshconn.Job{},
+		forceCh: make(chan struct{}), drained: make(chan struct{}),
 		q:    approval.NewQueue(notify, approvalTimeout),
 		pool: sshconn.NewPool(paths.KnownHosts()),
 		log:  &audit.Log{Path: paths.Audit()},
@@ -343,9 +352,13 @@ func (d *Daemon) Serve(ln net.Listener) error {
 	sock := paths.Socket()
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	d.mu.Lock()
+	d.ln = ln
+	d.mu.Unlock()
 	go func() {
 		<-sig
-		ln.Close()
+		go func() { <-sig; d.Drain(context.Background(), true) }() // a second signal means now
+		d.Drain(context.Background(), false)
 	}()
 	go func() {
 		for {

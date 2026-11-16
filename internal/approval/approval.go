@@ -45,7 +45,7 @@ type Notice struct{ Title, Body, Link string }
 
 type Decision struct {
 	OK      bool
-	Outcome string // approved|denied|timeout
+	Outcome string // approved|denied|timeout|restart
 	Message string // optional note from the human, passed back to the agent
 	CodeOK  bool
 	Sticky  bool
@@ -470,3 +470,10 @@ $x.Item(1).AppendChild($t.CreateTextNode($env:OSTIARY_BODY)) | Out-Null
 if ($env:OSTIARY_LINK) { $t.DocumentElement.SetAttribute('activationType', 'protocol'); $t.DocumentElement.SetAttribute('launch', $env:OSTIARY_LINK) }
 $app = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($app).Show([Windows.UI.Notifications.ToastNotification]::new($t))`
+
+// CancelAll finishes every undecided request with the given outcome (e.g. "restart").
+func (q *Queue) CancelAll(outcome string) {
+	for _, r := range q.Pending() {
+		_ = q.finish(r.ID, Decision{Outcome: outcome})
+	}
+}

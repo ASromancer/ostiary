@@ -589,11 +589,16 @@ def main():
         rel.shutdown()
         ENV.pop("OSTIARY_E2E_RELEASES_URL")
         check(rc == 10 and "99.0.0" in out, "upgrade --check reports a newer release (exit 10)", out + err)
-        os.kill(daemon_pid, signal.SIGTERM)
+        # graceful drain: stop waits for a running command; the next run finds the daemon gone or restarting
+        agent = subprocess.Popen([BIN, "run", "e2e", "sleep 3"], env=ENV, stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        time.sleep(1)
+        rc, out, err = run("stop")
+        out2, err2 = agent.communicate(timeout=30)
+        check(rc == 0 and agent.returncode == 0, "stop drains: the running command finishes with exit 0", out + err + out2 + err2)
         daemon_pid = None
-        time.sleep(0.5)
-        rc, _, _ = run("hosts")
-        check(rc == 102 and not os.path.exists(ENV["OSTIARY_SOCKET"]), "daemon stops cleanly")
+        rc, _, err = run("hosts")
+        check(rc in (102, 103) and not os.path.exists(ENV["OSTIARY_SOCKET"]), "daemon stops cleanly", err)
         print(f"\nall {passed} checks passed")
     finally:
         if daemon_pid:

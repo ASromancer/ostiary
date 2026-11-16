@@ -109,6 +109,9 @@ func cmdHosts(args []string) int {
 	return 0
 }
 
+// restartWait is how long a 103 (daemon draining) is waited out before the one retry.
+var restartWait = 10 * time.Second
+
 // execute runs an Exec request, waiting for human approval when needed.
 func execute(a daemon.ExecArgs) (daemon.ExecReply, int) {
 	c, code := dial()
@@ -117,10 +120,23 @@ func execute(a daemon.ExecArgs) (daemon.ExecReply, int) {
 	}
 	defer c.Close()
 	a.Env = env()
+	retried := false
 	for {
 		var r daemon.ExecReply
 		if err := c.Call("A.Exec", &a, &r); err != nil {
 			return r, callErr(err)
+		}
+		if r.Code == daemon.CodeRestarting && !retried {
+			retried = true
+			fmt.Fprintf(os.Stderr, "ostiary: restarting; retrying in %s\n", restartWait)
+			c.Close()
+			time.Sleep(restartWait)
+			if c, code = dial(); c == nil {
+				return r, code
+			}
+			defer c.Close()
+			a.ApprovalID = 0
+			continue
 		}
 		if r.Pending == 0 {
 			if r.Code != 0 {

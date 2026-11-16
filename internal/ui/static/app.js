@@ -365,7 +365,12 @@ function askForm(o) {
     const submit = button(o.ok || "Xác nhận", o.danger ? "danger solid" : "primary");
     submit.type = "submit";
     submit.setAttribute("form", form.id);
-    layer.foot.append(cancel, submit);
+    if (o.alt) {
+      const alt = button(o.alt, "danger");
+      alt.type = "button";
+      alt.addEventListener("click", () => { result = { alt: true }; layer.close(); });
+      layer.foot.append(cancel, alt, submit);
+    } else layer.foot.append(cancel, submit);
     layer.onClose = () => resolve(result);
     layer.focusFirst();
     if (!built.length) submit.focus();
@@ -373,6 +378,17 @@ function askForm(o) {
 }
 const confirmBox = (title, desc, o) => askForm(Object.assign({ title, desc }, o)).then(Boolean);
 
+// Before something that interrupts running work: "wait" (proceed, drain), "force" or null (cancelled).
+// lockOnly: locking only cuts new commands, so only open jobs and tunnels need a warning.
+async function confirmRunning(lockOnly) {
+  const r = (await call("GET", "/api/status")).Running || {};
+  const c = r.Commands || 0, jb = r.Jobs || 0, t = r.Tunnels || 0;
+  if (!(lockOnly ? jb + t : c + jb + t)) return "wait";
+  const desc = c + " lệnh đang chạy, " + jb + " job, " + t + " tunnel";
+  if (lockOnly) return (await confirmBox("Khóa vault?", desc + ". Khóa sẽ chặn lệnh mới.", { ok: "Khóa" })) ? "wait" : null;
+  const v = await askForm({ title: "Ostiary đang bận", desc: desc + ".", ok: "Chờ xong rồi cập nhật", alt: "Cập nhật luôn" });
+  return !v ? null : v.alt ? "force" : "wait";
+}
 function waitLayer(title, text) {
   const l = openLayer("modal", title);
   const b = el("div", "waitbody");
@@ -465,7 +481,9 @@ function renderUpdate(u) {
     const b = el("button", "btn primary", "Cập nhật");
     b.type = "button";
     b.addEventListener("click", () => busy(b, async () => {
-      const out = await admin("upgrade", u.Version);
+      const how = await confirmRunning(false);
+      if (!how) return;
+      const out = await admin("upgrade", u.Version, how === "force" ? { force: true } : undefined);
       if (out == null) return;
       if (out) ok(out);
       upgradeWait = waitLayer("Cập nhật Ostiary", "Ostiary đang khởi động lại…");
@@ -477,7 +495,7 @@ function renderUpdate(u) {
 async function toggleVault() {
   if (!status) return;
   if (status.VaultMissing) { location.hash = "#setup"; return; }
-  if (!status.Locked) { await call("POST", "/api/lock"); ok("Đã khóa vault"); return refresh(); }
+  if (!status.Locked) { if (!(await confirmRunning(true))) return; await call("POST", "/api/lock"); ok("Đã khóa vault"); return refresh(); }
   let pass = "";
   if (status.Passphrase) {
     const v = await askForm({ title: "Mở khóa vault", desc: "Nhập passphrase của vault.", ok: "Mở khóa", fields: [{ name: "pass", label: "Passphrase", type: "password", required: true }] });
@@ -1122,6 +1140,7 @@ async function loadKeychain() {
       await call("POST", "/api/unlock", { pass: pass ? pass.value : "" });
       ok("Đã mở khóa vault");
     } else {
+      if (!(await confirmRunning(true))) return;
       await call("POST", "/api/lock");
       ok("Đã khóa vault");
     }

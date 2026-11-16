@@ -61,7 +61,7 @@ func cmdDaemon(args []string) int {
 	}
 	var wait time.Duration
 	if *afterPid != 0 {
-		wait = 10 * time.Second // the successor waits for the old daemon to let go of the lock
+		wait = 70 * time.Second // the old daemon drains (up to 60 s) before it lets go of the lock
 	}
 	if err := daemon.AcquireLock(wait); err != nil {
 		return errf(1, "%v", err)

@@ -31,6 +31,7 @@ Start with the hosts tool. Every command is classified read/mutate/destructive/f
 Destructive commands need the human to approve in a terminal ('ostiary approve'); the run tool then
 returns an approval id: call run again with the same host, command and approval_id until it finishes.
 If a result says the request was denied or blocked, stop and ask the user; never retry another way.
+If it says ostiary is restarting (code 103), wait about 10 seconds and retry the same call once.
 No PTY: use 'top -bn1', 'cat', 'tail -n' instead of interactive programs. Prefer the output tool with
 grep over re-running heavy commands.`
 

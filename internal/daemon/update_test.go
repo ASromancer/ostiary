@@ -105,7 +105,7 @@ func TestRestartFailureKeepsServing(t *testing.T) {
 	if err := h.call("Status", &Empty{}, &StatusReply{}); err != nil {
 		t.Fatalf("daemon stopped serving after a failed restart: %v", err)
 	}
-	if err := h.d.restart(0); err == nil { // respawn still fails; not "in progress"
+	if err := h.d.restart(0, false); err == nil { // respawn still fails; not "in progress"
 		t.Fatal("expected error")
 	} else if strings.Contains(err.Error(), "in progress") {
 		t.Fatal("failed restart left the in-progress flag set")
@@ -117,10 +117,10 @@ func TestRestartIdempotent(t *testing.T) {
 	h.d.managedFn = func() bool { return false }
 	n := 0
 	h.d.respawn = func(int) error { n++; return nil }
-	if err := h.d.restart(time.Hour); err != nil {
+	if err := h.d.restart(time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.d.restart(time.Hour); err == nil || !strings.Contains(err.Error(), "already in progress") || n != 1 {
+	if err := h.d.restart(time.Hour, false); err == nil || !strings.Contains(err.Error(), "already in progress") || n != 1 {
 		t.Fatalf("second restart: %v (spawned %d)", err, n)
 	}
 }

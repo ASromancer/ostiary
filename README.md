@@ -54,6 +54,8 @@ Before anything is installed, the signature over `SHA256SUMS` is verified agains
 
 Set `OSTIARY_NO_UPDATE_CHECK=1` in the daemon's environment to turn off the background check.
 
+Stop, restart and upgrade drain first: new commands get exit 103, running commands get up to 60 s to finish, pending approvals are cancelled (the agent sees a 101 with a restart message), then jobs are killed. `ostiary stop --now` (and "Cập nhật luôn" in the UI) skips the wait; SIGTERM and SIGINT drain too (a second signal skips the wait). The UI asks first when something is running.
+
 A vault in passphrase mode needs unlocking again after the restart. The web UI session is lost on restart: reopen Ostiary from its icon or with `ostiary open`. On macOS, run `ostiary install-service` once after updating from 0.2.0 so launchd keeps `ostiary stop` stopped. After an in-place macOS upgrade Finder's Get Info may still show the old version (cosmetic).
 
 ## Moving from agentssh
@@ -88,15 +90,16 @@ Filesystem      Size  Used Avail Use% Mounted on
 /dev/sda1        80G   41G   36G  54% /
 ```
 
-An ostiary run passes the remote command's exit code through unchanged. ostiary uses three exit codes of its own:
+An ostiary run passes the remote command's exit code through unchanged. ostiary uses four exit codes of its own:
 
 | Code | Meaning |
 |---|---|
 | 100 | blocked by policy (forbidden, profile doesn't allow it, host not allowed) |
 | 101 | denied by the user or the approval timed out (default 120 s) |
 | 102 | daemon not running or vault locked |
+| 103 | ostiary is restarting (stop, upgrade): wait about 10 s and retry once; the CLI does this itself |
 
-If ostiary itself produced the exit code, it also prints a stderr line starting with `ostiary:`. If the remote command happens to exit with 100–102, no such line appears.
+If ostiary itself produced the exit code, it also prints a stderr line starting with `ostiary:`. If the remote command happens to exit with 100–103, no such line appears.
 
 ## Agents
 

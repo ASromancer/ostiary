@@ -101,11 +101,12 @@ func (s *Server) routes(mux *http.ServeMux) {
 			Host                         *hosts.Host
 			Key, KeyPassphrase, Password string
 			Pass                         string
+			Force                        bool
 		}
 		if !readJSON(w, r, &a) {
 			return
 		}
-		args := daemon.AdminArgs{Ticket: a.Ticket, Code: a.Code, Op: a.Op, Name: a.Name, Host: a.Host}
+		args := daemon.AdminArgs{Ticket: a.Ticket, Code: a.Code, Op: a.Op, Name: a.Name, Host: a.Host, Force: a.Force}
 		if a.Key != "" {
 			p, err := normalizeKey([]byte(a.Key), a.KeyPassphrase, a.Name)
 			if err != nil {

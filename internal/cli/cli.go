@@ -32,7 +32,7 @@ For agents:
 For the human user (need a real terminal; approvals and admin commands are confirmed
 in an OS authentication dialog, or with a code from a desktop notification as a fallback):
   ostiary open                       open the Ostiary app (starts the daemon if needed)
-  ostiary stop                       stop the daemon
+  ostiary stop [--now]               stop the daemon (waits up to 60 s for running commands; --now does not wait)
   ostiary upgrade [--check] [--yes]  install the latest release (--check: exit 10 if one exists)
   ostiary init [--passphrase] | unlock | lock | approve | reload | doctor | ui | daemon | install-polkit | install-service | uninstall-service
   ostiary host add|edit|ls|rm|trust ...
@@ -41,7 +41,8 @@ in an OS authentication dialog, or with a code from a desktop notification as a 
   ostiary install-hooks claude|codex|gemini|antigravity|all
 
 Exit codes: the remote command's own code, or
-  100 blocked by policy, 101 denied / approval timed out, 102 daemon not running or vault locked.
+  100 blocked by policy, 101 denied / approval timed out, 102 daemon not running or vault locked,
+  103 ostiary is restarting (wait ~10 s, retry once).
 Only errors produced by ostiary itself print a stderr line starting with "ostiary:".
 `
 
@@ -56,9 +57,10 @@ func init() {
 }
 
 var guidance = map[int]string{
-	daemon.CodeBlocked:  "blocked by policy: do not retry another way; tell the user what you wanted to do",
-	daemon.CodeDenied:   "stop and ask the user; do not retry another way",
-	daemon.CodeNoDaemon: "if you run in a sandbox (e.g. Codex), it may block ostiary's local socket: re-run this ostiary command outside the sandbox first; otherwise ask the user to start or unlock ostiary",
+	daemon.CodeBlocked:    "blocked by policy: do not retry another way; tell the user what you wanted to do",
+	daemon.CodeDenied:     "stop and ask the user; do not retry another way",
+	daemon.CodeRestarting: "ostiary is restarting; wait about 10 seconds and retry the same command once; if it fails again ask the user",
+	daemon.CodeNoDaemon:   "if you run in a sandbox (e.g. Codex), it may block ostiary's local socket: re-run this ostiary command outside the sandbox first; otherwise ask the user to start or unlock ostiary",
 }
 
 // Main runs a subcommand and returns the process exit code.
