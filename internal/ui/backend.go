@@ -22,6 +22,7 @@ type Backend interface {
 	SetupSkip(skip bool) error
 	Tunnels() ([]daemon.TunnelInfo, error)
 	TunnelClose(id int) error
+	Telegram() (daemon.TelegramReply, error)
 }
 
 type ServiceBackend struct{ S *daemon.Service }
@@ -69,4 +70,8 @@ func (b ServiceBackend) Tunnels() (r []daemon.TunnelInfo, err error) {
 }
 func (b ServiceBackend) TunnelClose(id int) error {
 	return b.S.TunnelClose(&daemon.TunnelArgs{ID: id}, &daemon.Empty{})
+}
+func (b ServiceBackend) Telegram() (r daemon.TelegramReply, err error) {
+	err = b.S.TelegramStatus(&daemon.Empty{}, &r)
+	return
 }

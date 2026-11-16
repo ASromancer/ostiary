@@ -89,3 +89,7 @@ func (f *fakeBackend) TunnelClose(id int) error {
 	f.closed = append(f.closed, id)
 	return nil
 }
+
+func (f *fakeBackend) Telegram() (daemon.TelegramReply, error) {
+	return daemon.TelegramReply{Configured: true, Paired: true, Bot: "ostiary_bot", AllowDestructive: true}, nil
+}

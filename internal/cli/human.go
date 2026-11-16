@@ -720,6 +720,17 @@ func doctorChecks(notify bool) []ui.Check {
 			} else {
 				warn("approvals use codes from desktop notifications (" + st.AuthNote + ")")
 			}
+			var tg daemon.TelegramReply
+			if err := c.Call("A.TelegramStatus", &daemon.Empty{}, &tg); err == nil && tg.Configured {
+				switch {
+				case tg.LastError != "":
+					warn("Telegram: không kết nối được (" + tg.LastError + ")")
+				case tg.Paired:
+					ok("Telegram: đã kết nối @" + tg.Bot)
+				default:
+					warn("Telegram: chưa ghép đôi (@" + tg.Bot + ")")
+				}
+			}
 		}
 		c.Close()
 	}

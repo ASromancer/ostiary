@@ -151,6 +151,14 @@ func (s *Server) routes(mux *http.ServeMux) {
 		}
 		writeJSON(w, struct{}{})
 	})
+	mux.HandleFunc("GET /api/telegram", func(w http.ResponseWriter, r *http.Request) {
+		t, err := b.Telegram()
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, t)
+	})
 	mux.HandleFunc("GET /api/setup", func(w http.ResponseWriter, r *http.Request) {
 		rep, err := b.Setup()
 		if err != nil {

@@ -49,7 +49,7 @@ type Decision struct {
 	Message string // optional note from the human, passed back to the agent
 	CodeOK  bool
 	Sticky  bool
-	Auth    string // code|os|none
+	Auth    string // code|os|telegram|none
 }
 
 const (
@@ -97,6 +97,12 @@ type Queue struct {
 	// returns false, the daemon authenticates the human through the OS and
 	// notifications carry no code. nil means true.
 	UseCodes func() bool
+	// OnAdd runs after a request is registered, OnResolve after it is
+	// decided (by anyone, including timeout and cancel). Set both before
+	// the queue is used. They run without the queue lock held and must
+	// not block.
+	OnAdd     func(Request)
+	OnResolve func(id int, d Decision)
 
 	mu      sync.Mutex
 	pending map[int]*entry
@@ -143,6 +149,9 @@ func (q *Queue) Add(r Request) bool {
 	q.mu.Lock()
 	q.pending[r.ID] = e
 	q.mu.Unlock()
+	if q.OnAdd != nil {
+		q.OnAdd(e.req)
+	}
 	time.AfterFunc(q.Timeout, func() { _ = q.finish(r.ID, Decision{Outcome: "timeout"}) })
 	time.AfterFunc(q.Timeout+time.Minute, func() { // nobody waited for it
 		q.mu.Lock()
@@ -156,9 +165,9 @@ func (q *Queue) Add(r Request) bool {
 // nothing, when the request is unknown or already decided.
 func (q *Queue) finish(id int, d Decision) bool {
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	e, ok := q.pending[id]
 	if !ok || e.decided {
+		q.mu.Unlock()
 		return false
 	}
 	e.decided = true
@@ -166,6 +175,10 @@ func (q *Queue) finish(id int, d Decision) bool {
 		q.sticky[stickyKey(e.req.Host, e.req.Cmd)] = time.Now().Add(StickyFor)
 	}
 	e.done <- d
+	q.mu.Unlock()
+	if q.OnResolve != nil {
+		q.OnResolve(id, d)
+	}
 	return true
 }
 
@@ -240,7 +253,7 @@ func (q *Queue) Decide(id int, code, choice, msg string) (Decision, error) {
 // caller (OS authentication), or that needs none (denials).
 func (q *Queue) Resolve(id int, choice, msg, auth string) (Decision, error) {
 	switch auth {
-	case "code", "os", "none":
+	case "code", "os", "none", "telegram":
 	default:
 		return Decision{}, fmt.Errorf("unknown auth %q", auth)
 	}
@@ -252,7 +265,7 @@ func (q *Queue) Resolve(id int, choice, msg, auth string) (Decision, error) {
 	if !ok || decided {
 		return Decision{}, fmt.Errorf("no pending request #%d", id)
 	}
-	d := Decision{CodeOK: auth == "code" || auth == "os", Auth: auth}
+	d := Decision{CodeOK: auth == "code" || auth == "os" || auth == "telegram", Auth: auth}
 	switch choice {
 	case "y":
 		d.OK, d.Outcome = true, "approved"

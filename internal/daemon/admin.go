@@ -27,6 +27,7 @@ var adminOps = map[string]bool{
 	"reload": true, "host-set": true, "host-rm": true, "trust": true,
 	"key-gen": true, "key-import": true, "key-rm": true, "key-export": true,
 	"init": true, "hooks": true, "autostart": true, "upgrade": true,
+	"telegram-pair": true, "telegram-unpair": true, "telegram-settings": true,
 }
 
 func (s *Service) Unlock(a *UnlockArgs, _ *Empty) error {
@@ -61,8 +62,12 @@ func (s *Service) Begin(a *BeginArgs, r *BeginReply) error {
 		return fmt.Errorf("unknown admin op %q", a.Op)
 	}
 	switch a.Op {
-	case "reload", "host-set", "host-rm", "key-gen", "key-import", "key-rm", "key-export":
+	case "reload", "host-set", "host-rm", "key-gen", "key-import", "key-rm", "key-export",
+		"telegram-pair", "telegram-unpair", "telegram-settings":
 		// Fail before a ticket or dialog exists: Admin would reject these anyway, after the human authenticated.
+		if a.Op == "telegram-settings" && a.Name != "destructive-on" && a.Name != "destructive-off" {
+			return fmt.Errorf("telegram-settings must be destructive-on or destructive-off, not %q", a.Name)
+		}
 		s.d.mu.Lock()
 		locked := s.d.data == nil
 		s.d.mu.Unlock()
@@ -162,6 +167,12 @@ func (d *Daemon) adminMessage(a *AdminArgs, data any) string {
 		return d.upgradeMessage(a.Name)
 	case "hooks":
 		return "install the Ostiary hook for " + a.Name
+	case "telegram-pair": // never the token
+		return "connect Ostiary to a Telegram bot"
+	case "telegram-unpair":
+		return "disconnect Telegram from Ostiary"
+	case "telegram-settings":
+		return "ostiary telegram " + a.Name
 	case "autostart":
 		if a.Name == "on" {
 			return "start Ostiary automatically at login"
@@ -225,6 +236,8 @@ func (d *Daemon) admin(a *AdminArgs, data any, r *AdminReply) error {
 		return nil
 	case "upgrade":
 		return d.upgrade(a.Name, a.Force, r)
+	case "telegram-pair", "telegram-unpair", "telegram-settings":
+		return d.telegramAdmin(a, r)
 	case "autostart":
 		if d.setup.SetAutostart == nil {
 			return errors.New("autostart is not available in this daemon")

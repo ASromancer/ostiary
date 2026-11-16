@@ -73,6 +73,8 @@ type Daemon struct {
 	managedFn   func() bool // tests only
 	restarting  atomic.Bool // a successor takes over the socket: do not remove it
 
+	tg tgState
+
 	drainMu   sync.Mutex // guards draining and running
 	draining  bool
 	running   int // commands executing over SSH
@@ -96,6 +98,7 @@ func New(notify func(approval.Notice) error, approvalTimeout time.Duration) (*Da
 		pool: sshconn.NewPool(paths.KnownHosts()),
 		log:  &audit.Log{Path: paths.Audit()},
 	}
+	d.q.OnAdd, d.q.OnResolve = d.tgNotify, d.tgResolved
 	d.human = humanok.Default
 	if why := osAuthOff(runtime.GOOS, os.Getenv("OSTIARY_OS_AUTH")); why != "" {
 		d.human = authOff(why)
@@ -260,6 +263,14 @@ func (d *Daemon) autoUnlock() {
 }
 
 func (d *Daemon) unlock(key *[32]byte, salt []byte) error {
+	if err := d.unlockData(key, salt); err != nil {
+		return err
+	}
+	d.tgResume()
+	return nil
+}
+
+func (d *Daemon) unlockData(key *[32]byte, salt []byte) error {
 	data, err := vault.Open(paths.Vault(), key)
 	if err != nil {
 		return err
@@ -278,6 +289,11 @@ func (d *Daemon) unlock(key *[32]byte, salt []byte) error {
 }
 
 func (d *Daemon) lock() {
+	d.lockData()
+	d.tgStop(false)
+}
+
+func (d *Daemon) lockData() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.data != nil {

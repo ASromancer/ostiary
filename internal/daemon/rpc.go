@@ -180,3 +180,14 @@ type HostListReply struct {
 	Hosts   map[string]hosts.Host
 	Trusted map[string]bool // host key pinned in known_hosts
 }
+
+// TelegramReply is the Telegram state for the UI and doctor. It never
+// contains the token.
+type TelegramReply struct {
+	Configured       bool // a bot token is stored
+	Paired           bool
+	Bot              string
+	Pairing          bool
+	AllowDestructive bool
+	LastError        string
+}

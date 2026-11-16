@@ -63,6 +63,7 @@ func (d *Daemon) Drain(ctx context.Context, force bool) {
 	d.draining = true
 	d.drainMu.Unlock()
 	defer close(d.drained)
+	d.tgStop(true)           // no callback may approve anything from here on
 	d.q.CancelAll("restart") // nothing can be approved during the wait only to be refused
 
 	if !force {
@@ -76,6 +77,7 @@ func (d *Daemon) Drain(ctx context.Context, force bool) {
 		}
 	}
 	d.q.CancelAll("restart")
+	d.tgWait() // let the "cancelled" message edits go out
 
 	d.mu.Lock()
 	ids := make([]int, 0, len(d.jobs))

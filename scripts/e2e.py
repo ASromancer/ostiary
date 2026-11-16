@@ -73,6 +73,59 @@ class UI:
         return status
 
 
+class FakeTelegram(http.server.BaseHTTPRequestHandler):
+    """A fake Telegram Bot API: scripted updates in, every call recorded."""
+    token = "111:E2E"
+    lock = threading.Lock()
+    updates, calls, next_msg = [], [], [500]
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        body = json.loads(self.rfile.read(n) or b"{}")
+        m = self.path.split("/")[-1]
+        if not self.path.startswith(f"/bot{self.token}/"):
+            return self.reply({"ok": False, "description": "Unauthorized"})
+        with self.lock:
+            self.calls.append((m, body))
+            res = True
+            if m == "getMe":
+                res = {"id": 1, "username": "e2e_bot"}
+            elif m == "sendMessage":
+                self.next_msg[0] += 1
+                res = {"message_id": self.next_msg[0]}
+            elif m == "getUpdates":
+                res, self.updates[:] = list(self.updates), []
+        if m == "getUpdates" and not res:
+            time.sleep(0.2)
+        self.reply({"ok": True, "result": res})
+
+    def reply(self, obj):
+        b = json.dumps(obj).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+    def log_message(self, *a):
+        pass
+
+    @classmethod
+    def find(cls, method, pred=lambda b: True, timeout=15):
+        end = time.time() + timeout
+        while time.time() < end:
+            with cls.lock:
+                for m, b in cls.calls:
+                    if m == method and pred(b):
+                        return b
+            time.sleep(0.1)
+        raise AssertionError(f"no {method} call; calls: {[m for m, _ in cls.calls]}")
+
+    @classmethod
+    def push(cls, u):
+        with cls.lock:
+            cls.updates.append(u)
+
+
 passed = 0
 
 
@@ -518,6 +571,9 @@ def main():
         # OS mode, with the fake dialog of the e2efake build.
         os.kill(daemon_pid, signal.SIGTERM)
         time.sleep(0.5)
+        tg = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeTelegram)
+        threading.Thread(target=tg.serve_forever, daemon=True).start()
+        ENV["OSTIARY_E2E_TELEGRAM_URL"] = f"http://127.0.0.1:{tg.server_port}"
         gate = os.path.join(TMP, "humanok")
         open(gate, "w").write("deny")
         ENV["OSTIARY_E2E_HUMANOK"] = gate
@@ -563,6 +619,41 @@ def main():
         check(st == 200 and f"rm {victimui}" in body, "UI shows the audit log", body)
         notes = open(NOTES).read()
         check(f"#req={rid}" in notes, "approval notification links to the UI request", notes[-300:])
+        # Telegram: pair through the UI admin path, then approve a request from a callback.
+        open(gate, "w").write("allow")
+        st, _, body = ui.req("POST", "/api/admin/begin", {"Op": "telegram-pair", "Name": ""})
+        tk = json.loads(body).get("Ticket")
+        st2, _, body = ui.req("POST", "/api/admin/commit", {"Ticket": tk, "Op": "telegram-pair", "Name": "", "Pass": FakeTelegram.token})
+        mt = re.match(r"@e2e_bot (\d{6})$", json.loads(body).get("out", ""))
+        check(st == 200 and st2 == 200 and mt, "telegram-pair via the UI stores the token and returns bot + code", body)
+        check(FakeTelegram.token not in open(f"{HOME}/.local/state/ostiary/audit.jsonl").read() and
+              FakeTelegram.token not in open(NOTES).read(), "the bot token is not in the audit log or notifications")
+        FakeTelegram.push({"update_id": 1, "message": {"message_id": 1, "chat": {"id": 42, "type": "private"},
+                                                       "from": {"id": 42}, "text": "/pair " + mt.group(1)}})
+        for _ in range(50):
+            tgs = json.loads(ui.req("GET", "/api/telegram")[2])
+            if tgs.get("Paired"):
+                break
+            time.sleep(0.2)
+        check(tgs.get("Paired") and tgs.get("Bot") == "e2e_bot" and "Token" not in tgs, "telegram pairs on /pair <code>", str(tgs))
+        victimtg = os.path.join(remote, "victimtg")
+        open(victimtg, "w").write("x")
+        agent = subprocess.Popen([BIN, "run", "e2e", f"rm {victimtg}"], env=ENV, stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        msg = FakeTelegram.find("sendMessage", lambda b: "rm " in b.get("text", "") and "reply_markup" in b)
+        btns = [b for row in msg["reply_markup"]["inline_keyboard"] for b in row]
+        approve = next(b for b in btns if b["callback_data"].split(":")[1] == "y")["callback_data"]
+        rid_tg, _, nonce_tg = approve.split(":")
+        mid = {"message_id": 501, "chat": {"id": 42, "type": "private"}}
+        FakeTelegram.push({"update_id": 2, "callback_query": {"id": "bad", "from": {"id": 99}, "message": mid, "data": approve}})
+        FakeTelegram.find("answerCallbackQuery", lambda b: b["callback_query_id"] == "bad" and b["text"] == "không hợp lệ")
+        check(agent.poll() is None and os.path.exists(victimtg), "a callback from another Telegram user is ignored")
+        FakeTelegram.push({"update_id": 3, "callback_query": {"id": "good", "from": {"id": 42}, "message": mid, "data": approve}})
+        out, err = agent.communicate(timeout=30)
+        FakeTelegram.find("editMessageText", lambda b: "qua Telegram" in b.get("text", ""))
+        st, _, body = ui.req("GET", "/api/audit?host=e2e&limit=10")
+        check(agent.returncode == 0 and not os.path.exists(victimtg) and '"auth":"telegram"' in body.replace(" ", ""),
+              "approve from a Telegram callback runs the command; audit shows auth=telegram", out + err + body[-600:])
         open(gate, "w").write("deny")
         victimd = os.path.join(remote, "victimd")
         open(victimd, "w").write("x")

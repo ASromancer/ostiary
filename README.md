@@ -223,6 +223,19 @@ When the agent runs something destructive:
 
 **Fallback: codes.** Without OS authentication (turned off, no local graphical session, polkit action missing or installed for another user), the notification carries a 4-character code that you type after choosing. Three wrong codes deny the request. A daemon that started in OS mode never switches to codes by itself (see above). `ostiary doctor` shows which mode is active.
 
+## Telegram approvals
+
+Approve agent requests from your phone. Set up (UI, Kho khóa → Telegram; each step is an approved admin operation):
+
+1. Create a bot with @BotFather and paste its token. The daemon checks it with `getMe` and shows `@<bot>` and a 6-digit pairing code.
+2. Send `/pair <code>` to the bot from a private chat. The code is valid for 10 minutes and allows 5 wrong attempts. The daemon then stores your chat and user id.
+
+New requests arrive as a message with the command in a monospace block and buttons: "Duyệt 1 lần", "30 phút" (not for destructive commands or tunnels) and "Từ chối". The message is edited when the request is decided, here or on the machine. A button press counts only from the paired user in the paired chat, with the request's one-time nonce, while the request is still pending; the audit log records it as `auth=telegram`. Admin operations (keys, hosts, upgrade, pairing) can never be approved from Telegram. "Cho phép duyệt lệnh phá hủy qua Telegram" (on by default) also covers tunnels; when off, those messages are informational with no buttons.
+
+The token is stored only in the encrypted vault (never logged or audited); unpairing deletes it. The daemon talks only to `https://api.telegram.org`, with a 60 s long poll and backoff; `ostiary doctor` shows `Telegram: đã kết nối @<bot>` or the error. The command text, host and agent name pass through Telegram's servers.
+
+**Threat note:** whoever controls the paired Telegram account can approve requests. Protect it with Telegram two-step verification and a passcode, and turn off destructive approval over Telegram if you do not need it.
+
 ## GUI
 
 The daemon serves a local page on `127.0.0.1` with a random port. Open it with `ostiary ui` or from the tray icon. Clicking an approval notification (Linux, Windows) opens it at that request.
