@@ -168,6 +168,10 @@ func (s *Service) TelegramStatus(_ *Empty, r *TelegramReply) error {
 	if svc := d.tgService(); svc != nil {
 		st := svc.Status()
 		r.Paired, r.Pairing, r.AllowDestructive, r.LastError = st.Paired, st.Pairing, st.AllowDestructive, st.LastError
+		r.PairCode = st.PairCode
+		if !st.PairExpires.IsZero() {
+			r.PairExpires = st.PairExpires.Unix()
+		}
 		if st.Bot != "" {
 			r.Bot = st.Bot
 		}

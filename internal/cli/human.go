@@ -107,6 +107,7 @@ func cmdDaemon(args []string) int {
 		srv, err = ui.Start(ui.Options{
 			Backend: ui.ServiceBackend{S: svc}, Port: *uiPort, Version: Version,
 			AuditFile: paths.Audit(), KnownHostsFile: paths.KnownHosts(),
+			HostsFile: paths.Hosts(), RulesFile: paths.Rules(), ApprovedDir: paths.Approved(),
 			Doctor: func() []ui.Check { return doctorChecks(false) },
 		})
 		if err != nil {

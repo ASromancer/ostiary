@@ -35,6 +35,8 @@
       <section class="view" data-view="setup" aria-labelledby="title"><div id="setupbox"></div></section>
 
       <section class="view" data-view="approvals" aria-labelledby="title">
+        <p id="codehint" class="hint hidden">Mã duyệt nằm trong thông báo trên máy. Cài polkit để duyệt bằng mật khẩu máy. <button type="button" class="linkbtn">Xem hướng dẫn</button></p>
+        <div id="overview" class="overview hidden" aria-label="Tổng quan hôm nay"></div>
         <div id="reqlist" class="reqs" aria-live="polite"></div>
         <div id="noreqwarn" class="banner hidden" role="status"></div>
         <div id="noreq" class="empty">
@@ -62,7 +64,7 @@
           <button type="button" id="keyimport" class="card tile"><i data-icon="upload"></i><b>Nhập key</b><span>Nạp private key có sẵn từ file</span></button>
           <button type="button" id="pwimport" class="card tile"><i data-icon="lock"></i><b>Lưu mật khẩu</b><span>Dùng khi server chỉ cho đăng nhập bằng mật khẩu</span></button>
         </div>
-        <div class="section-head"><h2>Key</h2></div>
+        <div class="section-head"><h2>Khóa SSH</h2></div>
         <div id="keylist" class="rows-list"></div>
         <div class="section-head">
           <h2>Mật khẩu</h2>
@@ -82,7 +84,7 @@
       <section class="view" data-view="log">
         <div class="section-head"><h2>Sức khỏe</h2><button type="button" id="rehealth" class="btn ghost"><i data-icon="refresh"></i>Kiểm tra lại</button></div>
         <div id="checks" class="health"></div>
-        <div class="section-head"><h2>Nhật ký</h2></div>
+        <div class="section-head"><h2>Nhật ký</h2><div class="seg" role="radiogroup" aria-label="Kiểu hiển thị nhật ký"><label><input type="radio" name="logview" value="session" checked><span>Theo phiên</span></label><label><input type="radio" name="logview" value="list"><span>Danh sách</span></label></div></div>
         <div class="toolbar">
           <div class="searchbox grow"><i data-icon="search"></i><input id="fhost" class="input" placeholder="Host" aria-label="Lọc theo host" autocomplete="off"></div>
           <div class="searchbox grow"><i data-icon="folder"></i><input id="fproject" class="input" placeholder="Project (repo / thư mục)" aria-label="Lọc theo project" autocomplete="off"></div>
@@ -95,7 +97,7 @@
         <div class="card">
           <div class="tablewrap">
             <table class="cards">
-              <thead><tr><th>Thời gian</th><th>#</th><th>Project</th><th>Agent</th><th>Host</th><th>Mức</th><th>Quyết định</th><th>Exit</th><th>Lệnh</th></tr></thead>
+              <thead><tr><th>Thời gian</th><th>#</th><th>Project</th><th>Agent</th><th>Host</th><th>Mức</th><th>Quyết định</th><th>Mã thoát</th><th>Lệnh</th></tr></thead>
               <tbody id="auditrows"></tbody>
             </table>
           </div>

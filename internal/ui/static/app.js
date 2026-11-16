@@ -69,6 +69,12 @@ function icon(name, size) {
 }
 document.querySelectorAll("i[data-icon]").forEach((i) => i.replaceWith(icon(i.dataset.icon)));
 
+// A loader awaits, then renders. Overlapping loads (refresh + SSE + polling) must not interleave
+// their renders: each load takes a ticket and renders only if it is still the newest.
+const gens = {};
+const nextGen = (k) => (gens[k] = (gens[k] || 0) + 1);
+const stale = (k, g) => gens[k] !== g;
+
 // ---- API ----
 async function call(method, path, body) {
   const opt = { method, headers: {} };
@@ -191,8 +197,8 @@ function reasonVi(text) {
 
 // ---- toasts ----
 function toast(msg, kind) {
-  const t = el("div", "toast " + (kind === "error" ? "bad" : kind === "ok" ? "ok" : ""));
-  t.appendChild(icon(kind === "error" ? "alert" : kind === "ok" ? "check" : "info"));
+  const t = el("div", "toast " + (kind === "error" ? "bad" : kind === "ok" ? "ok" : kind === "warn" ? "warn" : ""));
+  t.appendChild(icon(kind === "error" || kind === "warn" ? "alert" : kind === "ok" ? "check" : "info"));
   t.appendChild(el("div", "msg", msg));
   const x = el("button", "copybtn");
   x.type = "button";
@@ -202,9 +208,9 @@ function toast(msg, kind) {
   x.addEventListener("click", gone);
   t.appendChild(x);
   $("toasts").appendChild(t);
-  if (kind !== "error") setTimeout(gone, 5000); // errors stay until closed
+  if (kind !== "error" && kind !== "warn") setTimeout(gone, 5000); // errors and warnings stay until closed
 }
-const ok = (m) => toast(m, "ok");
+const ok = (m) => toast(m, /approvals use codes|dialog cannot be shown/.test(m) ? "warn" : "ok"); // a warning inside an ok result must not vanish
 const fail = (e) => sessionDead || toast(friendlyError(e && e.message ? e.message : String(e)), "error");
 
 async function busy(button, fn) {
@@ -356,6 +362,10 @@ function askForm(o) {
         if (d.required && empty) { setErr(f, d.errmsg || "Trường này là bắt buộc"); bad = bad || inp; } else setErr(f, "");
         vals[d.name] = v;
       });
+      if (!bad && o.validate) { // cross-field checks keep the dialog (and what was typed) open
+        const errs = o.validate(vals) || {};
+        built.forEach(({ d, inp, f }) => { if (errs[d.name]) { setErr(f, errs[d.name]); bad = bad || inp; } });
+      }
       if (bad) { bad.focus(); return; }
       result = vals;
       layer.close();
@@ -384,7 +394,7 @@ const confirmBox = (title, desc, o) => askForm(Object.assign({ title, desc }, o)
 async function confirmRunning(lockOnly) {
   const r = (await call("GET", "/api/status")).Running || {};
   const c = r.Commands || 0, jb = r.Jobs || 0, t = r.Tunnels || 0;
-  if (!(lockOnly ? jb + t : c + jb + t)) return "wait";
+  if (!(lockOnly ? jb + t : c + jb + t)) return lockOnly && !(await confirmBox("Khóa vault?", "Khóa sẽ chặn mọi lệnh mới của agent cho tới khi bạn mở khóa lại.", { ok: "Khóa" })) ? null : "wait";
   const desc = c + " lệnh đang chạy, " + jb + " job, " + t + " tunnel";
   if (lockOnly) return (await confirmBox("Khóa vault?", desc + ". Khóa sẽ chặn lệnh mới.", { ok: "Khóa" })) ? "wait" : null;
   const v = await askForm({ title: "Ostiary đang bận", desc: desc + ".", ok: "Chờ xong rồi cập nhật", alt: "Cập nhật luôn" });
@@ -431,6 +441,7 @@ function showView(name) {
   if (location.hash !== "#" + name && !location.hash.startsWith("#req=")) history.replaceState(null, "", "#" + name);
   const run = (p) => p.catch(fail);
   if (name === "setup") run(loadSetup());
+  if (name === "approvals") loadSummary().catch(() => {});
   if (name === "hosts") run(loadHosts());
   if (name === "keychain") run(loadKeychain());
   if (name === "knownhosts") run(loadKnownHosts());
@@ -453,6 +464,7 @@ async function loadStatus() {
   vs.title = miss ? "Chưa có vault: bấm để tạo ở màn Bắt đầu" : "Bấm để khóa hoặc mở khóa vault";
   vs.replaceChildren(icon(status.Locked || miss ? "lock" : "unlock"), document.createTextNode(miss ? "Chưa có vault" : status.Locked ? "Vault đang khóa" : "Vault đang mở"));
   noreqWarn();
+  $("codehint").classList.toggle("hidden", os || !!status.VaultMissing);
   const n = status.Pending ? String(status.Pending) : "";
   $("pendingcount").textContent = n;
   document.title = (n ? "(" + n + ") " : "") + "Ostiary";
@@ -535,6 +547,7 @@ async function needVault() {
   await toggleVault();
   return !status.Locked;
 }
+$("codehint").querySelector("button").addEventListener("click", () => { location.hash = "#setup"; });
 $("vaultstate").addEventListener("click", (e) => busy(e.currentTarget, toggleVault));
 
 // ---- approvals ----
@@ -646,7 +659,7 @@ function buildCard(r) {
     body.appendChild(ul);
   }
   const metas = el("div", "metas");
-  [["Agent", r.agent], ["User", r.user], ["cwd", r.cwd], ["Repo", r.repo], ["Loại", r.kind]].forEach(([k, v]) => { const m = metaChip(k, v); if (m) metas.appendChild(m); });
+  [["Agent", r.agent], ["Người dùng", r.user], ["cwd", r.cwd], ["Repo", r.repo], ["Loại", r.kind]].forEach(([k, v]) => { const m = metaChip(k, v); if (m) metas.appendChild(m); });
   body.appendChild(metas);
 
   if (r.code) {
@@ -777,13 +790,38 @@ async function loadPending() {
 }
 
 // reload approves whatever is on disk now, so say what that is before asking.
-function confirmReload() {
+// diffNode: a unified diff as a pre, one span per line, coloured by CSS class (text via textContent only).
+function diffNode(text) {
+  const pre = el("pre", "diff");
+  text.split("\n").forEach((l) => {
+    if (!l) return;
+    const c = l[0] === "+" ? "add" : l[0] === "-" ? "del" : l.startsWith("@@") ? "hunk" : "ctx";
+    pre.appendChild(el("span", "dl " + c, l));
+  });
+  return pre;
+}
+async function configDiffNodes() {
+  let files;
+  try { files = await call("GET", "/api/config/diff"); } catch (e) { return []; }
+  const box = el("div", "cfgdiff");
+  files.forEach((f) => {
+    const sec = el("div", "cfgfile");
+    sec.appendChild(el("b", null, f.name));
+    if (!f.approved) sec.appendChild(el("p", "muted", "chưa có bản đã duyệt để so sánh"));
+    else if (!f.diff) sec.appendChild(el("p", "muted", "không đổi so với bản đã duyệt"));
+    else sec.appendChild(diffNode(f.diff));
+    box.appendChild(sec);
+  });
+  return [box];
+}
+async function confirmReload() {
   const changed = status && status.UserOnly;
+  const nodes = await configDiffNodes();
   return confirmBox("Đọc lại cấu hình?",
     (changed ? "hosts.toml và/hoặc rules.toml đã thay đổi trên đĩa kể từ lần duyệt trước. " : "") +
     "Đọc lại sẽ duyệt mọi thay đổi trong hai file đó (host mới, allow/deny, quy tắc). " +
     "Hãy mở và xem trước khi duyệt, nhất là nếu bạn không tự sửa.",
-    { info: "~/.config/ostiary/hosts.toml\n~/.config/ostiary/rules.toml\n(Windows: %AppData%\\ostiary)", ok: changed ? "Tôi đã kiểm tra, đọc lại" : "Đọc lại", danger: !!changed });
+    { nodes, info: "~/.config/ostiary/hosts.toml\n~/.config/ostiary/rules.toml\n(Windows: %AppData%\\ostiary)", ok: changed ? "Tôi đã kiểm tra, đọc lại" : "Đọc lại", danger: !!changed });
 }
 // trust: compare the key the server presents now with what known_hosts pins.
 async function confirmTrust(name, info) {
@@ -970,7 +1008,10 @@ function renderHosts() {
   });
 }
 async function loadHosts() {
-  hostData = await call("GET", "/api/hosts");
+  const g = nextGen("hosts");
+  const hd = await call("GET", "/api/hosts");
+  if (stale("hosts", g)) return;
+  hostData = hd;
   renderHosts();
   loadTunnels().catch(fail);
 }
@@ -990,7 +1031,10 @@ function fmtLeft(until) {
   return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(x).padStart(2, "0");
 }
 async function loadTunnels() {
-  tunnelList = await call("GET", "/api/tunnels");
+  const g = nextGen("tunnels");
+  const tl = await call("GET", "/api/tunnels");
+  if (stale("tunnels", g)) return;
+  tunnelList = tl;
   const box = $("tunnelbox");
   box.replaceChildren();
   box.classList.toggle("hidden", !tunnelList.length);
@@ -1119,10 +1163,10 @@ async function openHostDrawer(name, h) {
   const fAgent = el("div", "field");
   fAgent.append(sw, el("div", "hint", "Tắt thì agent không thấy host này."));
 
-  const allow = chipInput(h && h.allow, "Gõ pattern rồi Enter", "Allow");
-  const deny = chipInput(h && h.deny, "Gõ pattern rồi Enter", "Deny");
-  const fAllow = el("div", "field"); fAllow.append(el("div", "lab", "Allow"), allow.node, el("div", "hint", "Lệnh khớp pattern được chạy không cần hỏi (nếu profile cho phép)."));
-  const fDeny = el("div", "field"); fDeny.append(el("div", "lab", "Deny"), deny.node, el("div", "hint", "Lệnh khớp pattern bị chặn."));
+  const allow = chipInput(h && h.allow, "Gõ pattern rồi Enter", "Cho phép chạy ngay");
+  const deny = chipInput(h && h.deny, "Gõ pattern rồi Enter", "Chặn");
+  const fAllow = el("div", "field"); fAllow.append(el("div", "lab", "Cho phép chạy ngay (allow)"), allow.node, el("div", "hint", "Lệnh khớp pattern được chạy không cần hỏi (nếu profile cho phép)."));
+  const fDeny = el("div", "field"); fDeny.append(el("div", "lab", "Chặn (deny)"), deny.node, el("div", "hint", "Lệnh khớp pattern bị chặn."));
 
   const tunnels = chipInput(h && h.tunnels, "host:port rồi Enter, vd 127.0.0.1:5432", "Cho phép tunnel tới");
   const fTun = field("Cho phép tunnel tới (host:port nhìn từ server)", tunnels.node, "Để trống = không cho tunnel. Mỗi lần mở tunnel agent vẫn phải được bạn duyệt.");
@@ -1179,11 +1223,16 @@ function shortFp(fp) { return fp.length > 26 ? fp.slice(0, 18) + "…" + fp.slic
 function usedBy(key) { return Object.keys(hostData.Hosts).filter((n) => hostData.Hosts[n].key === key).sort(); }
 
 async function loadKeychain() {
+  const g = nextGen("keychain");
   await loadStatus();
-  hostData = await call("GET", "/api/hosts").catch(() => hostData);
+  const hd = await call("GET", "/api/hosts").catch(() => null);
+  const miss = !!status.VaultMissing;
+  const locked = !!status.Locked;
+  const raw = !miss && !locked ? await call("GET", "/api/keys") : [];
+  if (stale("keychain", g)) return; // a newer load renders; everything below is synchronous
+  if (hd) hostData = hd;
   const hero = $("vaultcard");
   hero.replaceChildren();
-  const miss = !!status.VaultMissing;
   $("keygen").parentNode.classList.toggle("hidden", miss);
   if (miss) {
     hero.className = "card vault-hero locked";
@@ -1236,12 +1285,12 @@ async function loadKeychain() {
   const kl = $("keylist"), pl = $("pwlist");
   kl.replaceChildren();
   pl.replaceChildren();
-  if (status.Locked) {
+  if (locked) {
     kl.appendChild(emptyLine("Mở khóa vault để xem key."));
     pl.appendChild(emptyLine("Mở khóa vault để xem mật khẩu đã lưu."));
     return;
   }
-  const entries = (await call("GET", "/api/keys")).map((k) => { const i = k.indexOf("\t"); return { name: k.slice(0, i), info: k.slice(i + 1) }; });
+  const entries = raw.map((k) => { const i = k.indexOf("\t"); return { name: k.slice(0, i), info: k.slice(i + 1) }; });
   const keys = entries.filter((e) => e.info !== "password");
   const pws = entries.filter((e) => e.info === "password");
   if (!keys.length) kl.appendChild(emptyLine("Chưa có key nào. Tạo hoặc import một key ở trên."));
@@ -1351,7 +1400,7 @@ async function savePassword() {
 }
 
 // ---- telegram ----
-let tgCode = "", tgBot = "", tgTimer = null;
+let tgTimer = null;
 const tgStop = () => { if (tgTimer) { clearInterval(tgTimer); tgTimer = null; } };
 async function loadTelegram() {
   const box = $("tgcard");
@@ -1359,11 +1408,19 @@ async function loadTelegram() {
   box.classList.toggle("hidden", hide);
   box.previousElementSibling.classList.toggle("hidden", hide);
   if (hide) return;
+  const g = nextGen("telegram");
   const t = await call("GET", "/api/telegram");
-  if (!t.Pairing) { tgCode = ""; tgStop(); } else if (!tgTimer) tgTimer = setInterval(() => { if (view === "keychain") loadTelegram().catch(() => {}); else tgStop(); }, 2000);
-  if (t.Paired) tgBot = t.Bot;
+  if (stale("telegram", g)) return;
+  if (!t.Pairing) tgStop(); else if (!tgTimer) tgTimer = setInterval(() => { if (view === "keychain") loadTelegram().catch(() => {}); else tgStop(); }, 2000);
   box.replaceChildren(...tgNodes(t));
 }
+function tickPair() {
+  document.querySelectorAll(".tgleft").forEach((n) => {
+    const s = Math.max(0, Math.round((n._until - Date.now()) / 1000));
+    n.textContent = s ? Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0") + "." : "0:00. Mã đã hết hạn: bắt đầu lại.";
+  });
+}
+setInterval(tickPair, 1000);
 function tgNodes(t) {
   const out = [];
   const err = t.LastError ? el("p", "tgerr", friendlyError(t.LastError)) : null;
@@ -1400,11 +1457,17 @@ function tgNodes(t) {
     return out;
   }
   if (t.Pairing) {
-    out.push(el("p", null, "Đang chờ ghép nối" + (tgBot ? " với " + tgBot : "") + "…"));
-    if (tgCode) {
-      out.push(el("div", "tgcode", tgCode.replace(/^(\d{3})(\d+)$/, "$1 $2")),
-        el("p", null, "Gửi /pair " + tgCode + " cho " + (tgBot || "bot") + " (chat riêng). Mã có hiệu lực 10 phút."));
-    } else out.push(el("p", "hint", "Mã ghép nối chỉ hiện một lần. Nếu đã mất, hãy ngắt kết nối rồi bắt đầu lại."));
+    const bot = t.Bot ? "@" + t.Bot.replace(/^@/, "") : "bot";
+    out.push(el("p", null, "Đang chờ ghép nối với " + bot + "…"));
+    if (t.PairCode) {
+      const left = el("span", "tgleft");
+      left._until = t.PairExpires * 1000;
+      out.push(el("div", "tgcode", t.PairCode.replace(/^(\d{3})(\d+)$/, "$1 $2")));
+      const how = el("p", null, "Gửi /pair " + t.PairCode + " cho " + bot + " (chat riêng). Còn ");
+      how.appendChild(left);
+      out.push(how);
+      tickPair();
+    }
     out.push(privacy);
     if (err) out.push(err);
     return out;
@@ -1423,11 +1486,7 @@ function tgNodes(t) {
     const token = inp.value.trim();
     if (!token) { inp.focus(); return; }
     inp.value = "";
-    const o = await admin("telegram-pair", "", { beginPass: token });
-    if (o) {
-      const m = /^(\S+)\s+(\d{6})$/.exec(o);
-      if (m) { tgBot = m[1]; tgCode = m[2]; } else ok(o);
-    }
+    await admin("telegram-pair", "", { beginPass: token });
     loadTelegram().catch(fail);
   });
   go.addEventListener("click", submit);
@@ -1440,7 +1499,10 @@ function tgNodes(t) {
 // ---- known hosts ----
 let khData = [];
 async function loadKnownHosts() {
-  khData = await call("GET", "/api/knownhosts");
+  const g = nextGen("kh");
+  const d = await call("GET", "/api/knownhosts");
+  if (stale("kh", g)) return;
+  khData = d;
   renderKnownHosts();
 }
 $("khsearch").addEventListener("input", () => renderKnownHosts());
@@ -1491,7 +1553,9 @@ function renderKnownHosts() {
 
 // ---- log & health ----
 async function loadChecks() {
+  const g = nextGen("checks");
   const checks = await call("GET", "/api/doctor");
+  if (stale("checks", g)) return;
   const box = $("checks");
   box.replaceChildren();
   checks.forEach((c) => {
@@ -1529,50 +1593,127 @@ function decisionPill(d) {
   const cls = { allow: "ok", approved: "ok", denied: "bad", blocked: "bad", error: "bad", forbidden: "forbidden", timeout: "warn", ask: "accent" }[d] || "neutral";
   return el("span", "pill " + cls, DECISION_VI[d] || d);
 }
-const AUDIT_COLS = ["Thời gian", "#", "Project", "Agent", "Host", "Mức", "Quyết định", "Exit", "Lệnh"];
-async function loadAudit() {
-  const q = new URLSearchParams({ host: $("fhost").value.trim(), project: $("fproject").value.trim(), decision: $("fdecision").value, since: $("fsince").value, limit: PAGE, offset: auditOffset });
-  const r = await call("GET", "/api/audit?" + q);
-  const rows = $("auditrows");
-  rows.replaceChildren();
-  r.entries.forEach((e) => {
-    const tr = el("tr", e.id ? "click" : "");
-    const td = (cls, ...kids) => { const t = el("td", cls); kids.forEach((k) => t.append(k)); tr.appendChild(t); return t; };
-    td("nowrap", fmtTime(e.time));
-    td("nowrap", e.id ? "#" + e.id : "");
-    const proj = e.repo || e.cwd || "";
-    td("nowrap", proj.split(/[\\/]/).filter(Boolean).pop() || proj).title = proj + (e.repo && e.cwd && e.cwd !== e.repo ? "\ncwd: " + e.cwd : "");
-    td("nowrap muted", e.agent || "");
-    td("mono", e.host || "");
-    td("", e.level ? levelPill(e.level) : "");
-    td("", decisionPill(e.decision));
-    td(e.exit === undefined ? "" : e.exit === 0 ? "exit0" : "exitn", e.exit === undefined ? "" : String(e.exit));
-    const full = e.cmd + (e.note ? " (" + e.note + ")" : "");
-    const c = td("cmdcell", full);
-    c.title = full;
-    if (e.id) {
-      tr.tabIndex = 0;
-      tr.setAttribute("role", "button");
-      tr.setAttribute("aria-label", "Xem output #" + e.id);
-      tr.addEventListener("click", () => showOutput(e.id).catch(fail));
-      tr.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); showOutput(e.id).catch(fail); } });
-    }
-    Array.from(tr.children).forEach((t, i) => { t.dataset.label = AUDIT_COLS[i]; });
-    rows.appendChild(tr);
+const AUDIT_COLS = ["Thời gian", "#", "Project", "Agent", "Host", "Mức", "Quyết định", "Mã thoát", "Lệnh"];
+// ---- sessions:begin (also loaded by internal/ui/testdata/sessions_test.mjs) ----
+// Entries arrive newest first. A session is a run of consecutive entries with the same agent and
+// project (repo, else cwd) where neighbours are less than 30 minutes apart.
+const SESSION_GAP_MS = 30 * 60 * 1000;
+const projOf = (e) => e.repo || e.cwd || "";
+function groupSessions(entries) {
+  const out = [];
+  entries.forEach((e) => {
+    const g = out[out.length - 1];
+    const t = new Date(e.time).getTime();
+    if (g && (g.agent || "") === (e.agent || "") && g.proj === projOf(e) && g.oldest - t < SESSION_GAP_MS) {
+      g.entries.push(e);
+      g.oldest = t;
+    } else out.push({ agent: e.agent || "", proj: projOf(e), entries: [e], newest: t, oldest: t });
   });
+  return out;
+}
+// ---- sessions:end ----
+let logMode = "session";
+try { logMode = localStorage.getItem("ostiary-logview") === "list" ? "list" : "session"; } catch (e) { /* ignore */ }
+document.querySelectorAll('input[name="logview"]').forEach((r) => {
+  r.checked = r.value === logMode;
+  r.addEventListener("change", () => {
+    logMode = r.value;
+    try { localStorage.setItem("ostiary-logview", logMode); } catch (e) { /* ignore */ }
+    renderAudit();
+  });
+});
+const baseName = (p) => p.split(/[\\/]/).filter(Boolean).pop() || p;
+function auditRow(e) {
+  const tr = el("tr", e.id ? "click" : "");
+  const td = (cls, ...kids) => { const t = el("td", cls); kids.forEach((k) => t.append(k)); tr.appendChild(t); return t; };
+  td("nowrap", fmtTime(e.time));
+  td("nowrap", e.id ? "#" + e.id : "");
+  const proj = projOf(e);
+  td("nowrap", baseName(proj)).title = proj + (e.repo && e.cwd && e.cwd !== e.repo ? "\ncwd: " + e.cwd : "");
+  td("nowrap muted", e.agent || "");
+  td("mono", e.host || "");
+  td("", e.level ? levelPill(e.level) : "");
+  td("", decisionPill(e.decision));
+  td(e.exit === undefined ? "" : e.exit === 0 ? "exit0" : "exitn", e.exit === undefined ? "" : String(e.exit));
+  const full = e.cmd + (e.note ? " (" + e.note + ")" : "");
+  const c = td("cmdcell", full);
+  c.title = full;
+  if (e.id) {
+    tr.tabIndex = 0;
+    tr.setAttribute("role", "button");
+    tr.setAttribute("aria-label", "Xem output #" + e.id);
+    tr.addEventListener("click", () => showOutput(e.id).catch(fail));
+    tr.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); showOutput(e.id).catch(fail); } });
+  }
+  Array.from(tr.children).forEach((t, i) => { t.dataset.label = AUDIT_COLS[i]; });
+  return tr;
+}
+const fmtClock = (ms) => new Date(ms).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" });
+function sessionRange(g) {
+  const sameDay = new Date(g.newest).toDateString() === new Date(g.oldest).toDateString();
+  const from = sameDay ? new Date(g.oldest).toLocaleDateString("vi-VN") + " " + fmtClock(g.oldest) : fmtTime(g.oldest);
+  return g.newest - g.oldest < 60000 ? from : from + " – " + (sameDay ? fmtClock(g.newest) : fmtTime(g.newest));
+}
+function sessionHeader(g, rows) {
+  const tr = el("tr", "sess");
+  const td = el("td");
+  td.colSpan = 9;
+  const b = el("button", "sessbtn");
+  b.type = "button";
+  b.setAttribute("aria-expanded", "true");
+  const arrow = icon("chevr");
+  arrow.classList.add("sesschev");
+  const n = (d) => g.entries.filter((e) => e.decision === d).length;
+  const badges = el("span", "sessbadges");
+  [["denied", "bad", "từ chối"], ["blocked", "bad", "chặn"], ["approved", "ok", "đã duyệt"]].forEach(([d, cls, lab]) => {
+    if (n(d)) badges.appendChild(el("span", "pill " + cls, n(d) + " " + lab));
+  });
+  b.append(arrow, el("b", null, g.agent || "agent"), el("span", "sessproj", g.proj ? baseName(g.proj) : "(không rõ project)"),
+    el("span", "muted", sessionRange(g)), el("span", "pill neutral", g.entries.length + " lệnh"), badges);
+  if (g.proj) b.title = g.proj;
+  b.addEventListener("click", () => {
+    const open = b.getAttribute("aria-expanded") !== "true";
+    b.setAttribute("aria-expanded", String(open));
+    rows.forEach((r) => r.classList.toggle("hidden", !open));
+  });
+  td.appendChild(b);
+  tr.appendChild(td);
+  return tr;
+}
+let auditData = null;
+function renderAudit() {
+  const r = auditData;
+  if (!r) return;
+  const frag = document.createDocumentFragment();
+  if (logMode === "session") {
+    groupSessions(r.entries).forEach((g) => {
+      const rows = g.entries.map(auditRow);
+      frag.appendChild(sessionHeader(g, rows));
+      rows.forEach((x) => frag.appendChild(x));
+    });
+  } else r.entries.forEach((e) => frag.appendChild(auditRow(e)));
   if (!r.entries.length) {
     const tr = el("tr");
     const t = el("td", "muted", "Không có mục nào");
     t.colSpan = 9;
     tr.appendChild(t);
-    rows.appendChild(tr);
+    frag.appendChild(tr);
   }
+  $("auditrows").replaceChildren(frag);
   $("pageinfo").textContent = r.total ? (auditOffset + 1) + "–" + Math.min(auditOffset + PAGE, r.total) + " / " + r.total : "Không có mục nào";
   $("prev").disabled = auditOffset === 0;
   $("next").disabled = auditOffset + PAGE >= r.total;
 }
+async function loadAudit() {
+  const q = new URLSearchParams({ host: $("fhost").value.trim(), project: $("fproject").value.trim(), decision: $("fdecision").value, since: $("fsince").value, limit: PAGE, offset: auditOffset });
+  const g = nextGen("audit");
+  const r = await call("GET", "/api/audit?" + q);
+  if (stale("audit", g)) return;
+  auditData = r;
+  renderAudit();
+}
 async function showOutput(id) {
-  const l = openLayer("drawer", "Output #" + id);
+  const l = openLayer("drawer", "Kết quả lệnh #" + id);
   const bar = el("div", "toolbar");
   const sb = el("div", "searchbox grow");
   const grep = el("input", "input");
@@ -1612,9 +1753,36 @@ $("fdecision").addEventListener("change", reload);
 $("prev").addEventListener("click", () => { auditOffset = Math.max(0, auditOffset - PAGE); loadAudit().catch(fail); });
 $("next").addEventListener("click", () => { auditOffset += PAGE; loadAudit().catch(fail); });
 
+// ---- overview strip (Duyệt, wide screens only) ----
+const wide = matchMedia("(min-width: 860px)");
+async function loadSummary() {
+  const box = $("overview");
+  if (!wide.matches) return;
+  const g = nextGen("summary");
+  const r = await call("GET", "/api/summary");
+  if (stale("summary", g)) return;
+  const stat = (n, label, cls) => { const s = el("span", "ovstat " + cls); s.append(el("b", null, n), document.createTextNode(" " + label)); return s; };
+  const t = r.today || {};
+  const kids = [el("span", "ovlabel", "Hôm nay"),
+    stat(t.allow || 0, "tự cho phép", "ok"), stat(t.approved || 0, "đã duyệt", "ok"),
+    stat((t.denied || 0) + (t.forbidden || 0) + (t.timeout || 0), "từ chối", "bad"), stat(t.blocked || 0, "chặn", "bad"),
+    el("span", "ovsep"),
+    stat(r.tunnels, "tunnel đang mở", ""),
+    el("span", "ovtext", "Telegram: " + ({ paired: "đã kết nối", pairing: "đang ghép nối" }[r.telegram] || "chưa kết nối"))];
+  if (r.lastBlocked) {
+    const lb = el("span", "ovlast");
+    lb.append(el("span", "muted", "Lệnh bị chặn gần nhất: "), el("code", null, r.lastBlocked.cmd), el("span", "muted", " · " + relTime(r.lastBlocked.time)));
+    lb.title = r.lastBlocked.cmd;
+    kids.push(lb);
+  }
+  box.replaceChildren(...kids);
+  box.classList.remove("hidden");
+}
+
 // ---- live updates ----
 async function refresh() {
   try { await loadStatus(); await loadPending(); } catch (e) { fail(e); }
+  if (view === "approvals") loadSummary().catch(() => {});
   await setupGate();
   if (view === "setup" && !document.activeElement.matches("input")) loadSetup().catch(fail);
   if (view === "hosts") loadHosts().catch(fail);
@@ -1684,10 +1852,9 @@ async function passphraseInit() {
   const v = await askForm({
     title: "Dùng passphrase", desc: "Vault được mã hóa bằng passphrase này; bạn nhập lại mỗi lần mở khóa. Ostiary không thể khôi phục nếu bạn quên.", ok: "Tạo vault",
     fields: [{ name: "p1", label: "Passphrase", type: "password", required: true, autocomplete: "new-password" }, { name: "p2", label: "Nhập lại", type: "password", required: true, autocomplete: "new-password" }],
+    validate: (v) => (v.p1.length < 8 ? { p1: "Passphrase cần ít nhất 8 ký tự" } : v.p1 !== v.p2 ? { p2: "Hai passphrase không khớp" } : {}),
   });
   if (!v) return;
-  if (v.p1.length < 8) throw new Error("Passphrase cần ít nhất 8 ký tự");
-  if (v.p1 !== v.p2) throw new Error("Hai passphrase không khớp");
   return admin("init", "passphrase", { pass: v.p1 });
 }
 async function loadSetup() {

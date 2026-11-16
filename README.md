@@ -197,6 +197,8 @@ The daemon finds this file by walking up from the agent's working directory. It 
 
 The daemon reads `hosts.toml` and `rules.toml` only at startup and on `ostiary reload` (which you confirm like any admin operation). If the files changed on disk since you last approved them, the daemon refuses every agent request until you run `ostiary reload`.
 
+Each approved `host-set`, `host-rm`, `reload` and `init` also saves a copy of both files in `~/.local/state/ostiary/approved/` (mode 0600). The UI's "Đọc lại cấu hình" confirm shows what changed since that copy, as a coloured diff, before you approve it.
+
 ## Approvals
 
 Approvals and admin operations (key generation, host edits, ...) are confirmed through your operating system's authentication dialog, opened by the daemon itself:
@@ -227,7 +229,7 @@ When the agent runs something destructive:
 
 Approve agent requests from your phone. Set up (UI, Kho khóa → Telegram; each step is an approved admin operation):
 
-1. Create a bot with @BotFather and paste its token. The daemon checks it with `getMe` and shows `@<bot>` and a 6-digit pairing code.
+1. Create a bot with @BotFather and paste its token. The daemon checks it with `getMe` and shows `@<bot>` and a 6-digit pairing code, which stays visible (with a countdown) in the UI while pairing is pending, also after a page reload.
 2. Send `/pair <code>` to the bot from a private chat. The code is valid for 10 minutes and allows 5 wrong attempts. The daemon then stores your chat and user id.
 
 New requests arrive as a message with the command in a monospace block and buttons: "Duyệt 1 lần", "30 phút" (not for destructive commands or tunnels) and "Từ chối". The message is edited when the request is decided, here or on the machine. A button press counts only from the paired user in the paired chat, with the request's one-time nonce, while the request is still pending; the audit log records it as `auth=telegram`. Admin operations (keys, hosts, upgrade, pairing) can never be approved from Telegram. "Cho phép duyệt lệnh phá hủy qua Telegram" (on by default) also covers tunnels; when off, those messages are informational with no buttons.
@@ -240,10 +242,10 @@ The token is stored only in the encrypted vault (never logged or audited); unpai
 
 The daemon serves a local page on `127.0.0.1` with a random port. Open it with `ostiary ui` or from the tray icon. Clicking an approval notification (Linux, Windows) opens it at that request.
 
-- **Duyệt:** pending requests with the exact command (risky parts highlighted), approve once, approve 30 minutes, deny, or deny with a message. Approving shows the OS authentication dialog, as in the terminal.
-- **Host:** add, edit, delete, trust a host key, reload the config.
+- **Duyệt:** pending requests with the exact command (risky parts highlighted), approve once, approve 30 minutes, deny, or deny with a message. Approving shows the OS authentication dialog, as in the terminal. On screens 860 px and wider, a strip on top shows today's commands by decision, open tunnels, the Telegram state and the last blocked command.
+- **Host:** add, edit, delete, trust a host key, reload the config (after showing the diff against the last approved copy).
 - **Vault & key:** lock and unlock; generate, import and delete keys. Private keys are never shown; exporting stays in the terminal (`ostiary key export`).
-- **Nhật ký & trạng thái:** the `doctor` checks and the audit log, with each command's full output.
+- **Nhật ký & trạng thái:** the `doctor` checks and the audit log, with each command's full output. "Theo phiên" (default) groups consecutive entries of the same agent and project (repo, else working directory), less than 30 minutes apart, into collapsible sessions with the time range, command count and denied/approved badges; "Danh sách" is the flat table. The choice is remembered in the browser.
 
 Login links are single use (10 minutes): `ostiary ui` asks the daemon for one over its socket (`ostiary ui --print` prints it), and the tray and notifications mint their own. The page then keeps a session cookie that expires after 8 hours idle. It refuses other hosts and cross-origin requests. In OS-auth mode, approving and admin changes go through the OS dialog; in code mode they need the approval code, and deny and lock need neither. Clickable notifications exist only in OS-auth mode. Flags: `ostiary daemon --no-ui`, `--no-tray`, `--ui-port N`. On GNOME the tray icon needs the AppIndicator extension (preinstalled on Ubuntu).
 
@@ -286,6 +288,7 @@ Locations on Linux and macOS (see the Windows section above for Windows):
 | `~/.config/ostiary/vault.bin` | keys, encrypted with nacl/secretbox |
 | `~/.config/ostiary/known_hosts` | pinned host keys |
 | `~/.local/state/ostiary/audit.jsonl` | audit log (no command output) |
+| `~/.local/state/ostiary/approved/` | copies of `hosts.toml` and `rules.toml` as last approved (for the reload diff) |
 | `~/.local/state/ostiary/out/<id>` | full output, deleted after 7 days |
 
 Background jobs live in the daemon and are lost if it restarts. Their output stays in `out/`.

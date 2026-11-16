@@ -194,4 +194,6 @@ type TelegramReply struct {
 	Pairing          bool
 	AllowDestructive bool
 	LastError        string
+	PairCode         string // while Pairing: the code to send to the bot (cookie-guarded UI only)
+	PairExpires      int64  // unix seconds
 }

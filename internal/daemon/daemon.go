@@ -242,6 +242,27 @@ func ConfigHash() string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// saveApproved keeps a copy of hosts.toml and rules.toml as last approved
+// (0600), for the reload diff. A missing source removes its copy.
+func saveApproved() {
+	dir := paths.Approved()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		log.Printf("approved config copy: %v", err)
+		return
+	}
+	for _, p := range []string{paths.Hosts(), paths.Rules()} {
+		dst := filepath.Join(dir, filepath.Base(p))
+		b, err := os.ReadFile(p)
+		if err != nil {
+			os.Remove(dst)
+			continue
+		}
+		if err := os.WriteFile(dst, b, 0o600); err != nil {
+			log.Printf("approved config copy: %v", err)
+		}
+	}
+}
+
 func (d *Daemon) autoUnlock() {
 	salt, err := vault.Salt(paths.Vault())
 	if err != nil {

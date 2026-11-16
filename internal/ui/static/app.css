@@ -284,7 +284,7 @@ td.nowrap { white-space: nowrap; color: var(--text2); }
 /* ---------- toasts ---------- */
 .toasts { position: fixed; left: 50%; transform: translateX(-50%); bottom: 20px; z-index: 80; display: flex; flex-direction: column; gap: 8px; width: min(380px, calc(100vw - 40px)); pointer-events: none; }
 .toast { pointer-events: auto; display: flex; align-items: flex-start; gap: 10px; padding: 11px 12px; border-radius: var(--r2); background: var(--s1); border: 1px solid var(--border-strong); border-left: 3px solid var(--c, var(--accent)); box-shadow: var(--sh2); font-size: var(--f13); animation: toastin .18s var(--ease); }
-.toast.ok { --c: var(--ok); } .toast.bad { --c: var(--danger); }
+.toast.ok { --c: var(--ok); } .toast.bad { --c: var(--danger); } .toast.warn { --c: var(--warn); }
 .toast .ic { color: var(--c); margin-top: 2px; }
 .toast .msg { flex: 1; overflow-wrap: anywhere; }
 .toast.out { opacity: 0; transform: translateY(6px); transition: all .15s var(--ease); }
@@ -444,3 +444,36 @@ a { color: var(--accent); text-underline-offset: 2px; }
 .tgcode { font: 700 40px/1 ui-monospace, monospace; letter-spacing: .12em; padding: 14px 0; color: var(--accent); }
 .tgerr { color: var(--danger); font-weight: 600; font-size: var(--f13); }
 .tgact { display: flex; gap: 8px; }
+
+/* config diff in the reload confirm */
+.cfgdiff { display: grid; gap: 10px; margin: 0 0 14px; }
+.cfgfile > b { font: 600 var(--f13) var(--mono); }
+.cfgfile p { margin: 4px 0 0; font-size: var(--f13); }
+pre.diff { margin: 4px 0 0; padding: 8px 0; max-height: 240px; overflow: auto; border: 1px solid var(--border); border-radius: var(--r1); background: var(--s2); font: var(--f12)/1.5 var(--mono); }
+pre.diff .dl { display: block; padding: 0 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+pre.diff .add { background: color-mix(in srgb, var(--ok) 16%, transparent); color: light-dark(#166534, var(--ok)); }
+pre.diff .del { background: color-mix(in srgb, var(--danger) 14%, transparent); color: light-dark(#b42318, var(--danger)); }
+pre.diff .hunk { color: var(--muted); }
+pre.diff .ctx { color: var(--text2); }
+
+/* overview strip: wide screens only */
+.overview { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 16px; margin: 0 0 16px; padding: 10px 14px; border: 1px solid var(--border); border-radius: var(--r2); background: var(--s1); font-size: var(--f13); }
+@media (max-width: 859px) { .overview { display: none !important; } }
+.ovlabel { font-weight: 650; }
+.ovstat b { font-size: var(--f16); }
+.ovstat.ok b { color: light-dark(#166534, var(--ok)); } .ovstat.bad b { color: light-dark(#b42318, var(--danger)); }
+.ovsep { width: 1px; align-self: stretch; background: var(--border); }
+.ovlast { min-width: 0; flex: 1 1 240px; display: flex; align-items: baseline; gap: 4px; white-space: nowrap; }
+.ovlast code { font: var(--f12) var(--mono); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+
+/* log sessions */
+tr.sess td { padding: 0; background: var(--s2); border-bottom: 1px solid var(--border); }
+.sessbtn { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; width: 100%; padding: 9px 12px; border: 0; background: none; text-align: left; cursor: pointer; font-size: var(--f13); }
+.sessbtn:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.sessbtn .sesschev { transition: transform .12s var(--ease); transform: rotate(90deg); }
+.sessbtn[aria-expanded="false"] .sesschev { transform: none; }
+.sessproj { font-family: var(--mono); }
+.sessbadges { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.tgleft { font-variant-numeric: tabular-nums; font-weight: 600; }
+#codehint { margin: 0 0 12px; color: var(--text2); font-size: var(--f13); }
+@media (max-width: 860px) { .sidebar { scrollbar-width: none; } .sidebar::-webkit-scrollbar { display: none; } .side-foot .linkbtn { flex: none; margin: 0; } }

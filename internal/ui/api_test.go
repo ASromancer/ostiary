@@ -20,6 +20,7 @@ import (
 	"golang.org/x/crypto/ssh/knownhosts"
 
 	"github.com/ASromancer/ostiary/internal/approval"
+	"github.com/ASromancer/ostiary/internal/audit"
 	"github.com/ASromancer/ostiary/internal/daemon"
 	"github.com/ASromancer/ostiary/internal/paths"
 )
@@ -304,5 +305,64 @@ func TestAPITunnels(t *testing.T) {
 	}
 	if len(f.closed) != 1 {
 		t.Fatalf("guarded calls reached the backend: %v", f.closed)
+	}
+}
+
+func TestAPIConfigDiff(t *testing.T) {
+	dir := t.TempDir()
+	hosts, rules, appr := filepath.Join(dir, "hosts.toml"), filepath.Join(dir, "rules.toml"), filepath.Join(dir, "approved")
+	os.Mkdir(appr, 0o700)
+	os.WriteFile(hosts, []byte("a\nb\nc\n"), 0o600)
+	os.WriteFile(filepath.Join(appr, "hosts.toml"), []byte("a\nc\n"), 0o600)
+	s := newServer(Options{Backend: &fakeBackend{}, HostsFile: hosts, RulesFile: rules, ApprovedDir: appr}, 8123)
+	w := api(t, s, "GET", "/api/config/diff", "")
+	var got []struct {
+		Name     string
+		Approved bool
+		Diff     string
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || len(got) != 2 {
+		t.Fatalf("%v %s", err, w.Body.String())
+	}
+	if !got[0].Approved || got[0].Diff != "@@ -1,2 +1,3 @@\n a\n+b\n c\n" {
+		t.Fatalf("hosts: %+v", got[0])
+	}
+	if got[1].Name != "rules.toml" || got[1].Approved || got[1].Diff != "" {
+		t.Fatalf("rules without a copy: %+v", got[1])
+	}
+}
+
+func TestAPISummary(t *testing.T) {
+	dir := t.TempDir()
+	af := filepath.Join(dir, "audit.jsonl")
+	now := time.Now()
+	var b strings.Builder
+	for _, e := range []audit.Entry{
+		{Time: now, Kind: "run", Decision: "allow", Cmd: "ls"},
+		{Time: now, Kind: "run", Decision: "allow", Cmd: "pwd"},
+		{Time: now, Kind: "run", Decision: "blocked", Cmd: "rm -rf /"},
+		{Time: now, Kind: "admin", Decision: "approved", Cmd: "reload"},
+		{Time: now.Add(-48 * time.Hour), Kind: "run", Decision: "allow", Cmd: "old"},
+	} {
+		j, _ := json.Marshal(e)
+		b.Write(j)
+		b.WriteByte('\n')
+	}
+	os.WriteFile(af, []byte(b.String()), 0o600)
+	f := &fakeBackend{tunnels: []daemon.TunnelInfo{{ID: 1}, {ID: 2}}}
+	s := newServer(Options{Backend: f, AuditFile: af}, 8123)
+	w := api(t, s, "GET", "/api/summary", "")
+	var got struct {
+		Today       map[string]int
+		LastBlocked *audit.Entry
+		Tunnels     int
+		Telegram    string
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err, w.Body.String())
+	}
+	if got.Today["allow"] != 2 || got.Today["blocked"] != 1 || got.Today["approved"] != 0 ||
+		got.LastBlocked == nil || got.LastBlocked.Cmd != "rm -rf /" || got.Tunnels != 2 || got.Telegram != "paired" {
+		t.Fatalf("%s", w.Body.String())
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -163,6 +164,60 @@ func (s *Server) routes(mux *http.ServeMux) {
 		}
 		writeJSON(w, t)
 	})
+	mux.HandleFunc("GET /api/summary", func(w http.ResponseWriter, r *http.Request) {
+		midnight := time.Now()
+		midnight = time.Date(midnight.Year(), midnight.Month(), midnight.Day(), 0, 0, 0, 0, midnight.Location())
+		all, err := scanAudit(s.opt.AuditFile, func(e audit.Entry) bool {
+			return !e.Time.Before(midnight) && (e.Kind == "run" || e.Kind == "job" || e.Kind == "get" || e.Kind == "put")
+		})
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		sum := struct {
+			Today       map[string]int `json:"today"` // by decision, agent commands only
+			LastBlocked *audit.Entry   `json:"lastBlocked"`
+			Tunnels     int            `json:"tunnels"`
+			Telegram    string         `json:"telegram"` // none|pairing|paired
+		}{Today: map[string]int{}}
+		for i := range all {
+			sum.Today[all[i].Decision]++
+			if sum.LastBlocked == nil && all[i].Decision == "blocked" {
+				sum.LastBlocked = &all[i]
+			}
+		}
+		if t, err := b.Tunnels(); err == nil {
+			sum.Tunnels = len(t)
+		}
+		sum.Telegram = "none"
+		if tg, err := b.Telegram(); err == nil {
+			switch {
+			case tg.Paired:
+				sum.Telegram = "paired"
+			case tg.Pairing:
+				sum.Telegram = "pairing"
+			}
+		}
+		writeJSON(w, sum)
+	})
+	mux.HandleFunc("GET /api/config/diff", func(w http.ResponseWriter, r *http.Request) {
+		type fileDiff struct {
+			Name     string `json:"name"`
+			Approved bool   `json:"approved"` // a last-approved copy exists
+			Diff     string `json:"diff"`
+		}
+		out := []fileDiff{}
+		for _, f := range []struct{ name, cur string }{{"hosts.toml", s.opt.HostsFile}, {"rules.toml", s.opt.RulesFile}} {
+			cur, _ := os.ReadFile(f.cur)
+			old, err := os.ReadFile(filepath.Join(s.opt.ApprovedDir, f.name))
+			d := fileDiff{Name: f.name, Approved: err == nil}
+			if err == nil {
+				d.Diff = unifiedDiff(string(old), string(cur))
+			}
+			out = append(out, d)
+		}
+		writeJSON(w, out)
+	})
 	mux.HandleFunc("GET /api/setup", func(w http.ResponseWriter, r *http.Request) {
 		rep, err := b.Setup()
 		if err != nil {
@@ -298,8 +353,36 @@ func readLine(br *bufio.Reader, max int) ([]byte, error) {
 	}
 }
 
-// readAudit returns audit entries newest first, filtered and paged.
+// scanAudit returns the audit entries keep accepts, newest first.
 // ponytail: reads the whole file per request; index or tail-read if logs get huge.
+func scanAudit(path string, keep func(audit.Entry) bool) ([]audit.Entry, error) {
+	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var all []audit.Entry
+	br := bufio.NewReader(f)
+	for {
+		line, err := readLine(br, 4<<20) // over-long or unparseable lines are skipped, not fatal
+		if len(line) > 0 {
+			var e audit.Entry
+			if json.Unmarshal(line, &e) == nil && keep(e) {
+				all = append(all, e)
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	sort.SliceStable(all, func(i, j int) bool { return all[i].Time.After(all[j].Time) })
+	return all, nil
+}
+
+// readAudit returns audit entries newest first, filtered and paged.
 // project matches, case-insensitively, a substring of the entry's repo or cwd.
 func readAudit(path, host, decision, since, project string, limit, offset int) ([]audit.Entry, int, error) {
 	project = strings.ToLower(project)
@@ -314,31 +397,13 @@ func readAudit(path, host, decision, since, project string, limit, offset int) (
 		}
 		sinceT = t
 	}
-	f, err := os.Open(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return []audit.Entry{}, 0, nil
-	}
+	all, err := scanAudit(path, func(e audit.Entry) bool {
+		return !(host != "" && e.Host != host) && !(decision != "" && e.Decision != decision) && !(!sinceT.IsZero() && e.Time.Before(sinceT)) &&
+			(project == "" || strings.Contains(strings.ToLower(e.Repo+"\n"+e.Cwd), project))
+	})
 	if err != nil {
 		return nil, 0, err
 	}
-	defer f.Close()
-	var all []audit.Entry
-	br := bufio.NewReader(f)
-	for {
-		line, err := readLine(br, 4<<20) // over-long or unparseable lines are skipped, not fatal
-		if len(line) > 0 {
-			var e audit.Entry
-			if json.Unmarshal(line, &e) == nil &&
-				!(host != "" && e.Host != host) && !(decision != "" && e.Decision != decision) && !(!sinceT.IsZero() && e.Time.Before(sinceT)) &&
-				(project == "" || strings.Contains(strings.ToLower(e.Repo+"\n"+e.Cwd), project)) {
-				all = append(all, e)
-			}
-		}
-		if err != nil {
-			break
-		}
-	}
-	sort.SliceStable(all, func(i, j int) bool { return all[i].Time.After(all[j].Time) })
 	total := len(all)
 	offset = max(0, min(offset, total))
 	end := min(offset+limit, total)

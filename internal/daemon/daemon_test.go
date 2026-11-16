@@ -441,6 +441,17 @@ func TestDaemonEndToEnd(t *testing.T) {
 	if r := h.exec(ExecArgs{Cmd: "echo hi"}); r.Code != 0 {
 		t.Fatalf("after reload: %+v", r)
 	}
+	// the reload approved this hosts.toml: a copy is kept for the diff
+	cur, _ := os.ReadFile(paths.Hosts())
+	cp, err := os.ReadFile(filepath.Join(paths.Approved(), "hosts.toml"))
+	if err != nil || !bytes.Equal(cur, cp) {
+		t.Fatalf("approved copy: %v", err)
+	}
+	if runtime.GOOS != "windows" {
+		if fi, _ := os.Stat(filepath.Join(paths.Approved(), "hosts.toml")); fi.Mode().Perm() != 0o600 {
+			t.Fatalf("approved copy mode %v", fi.Mode())
+		}
+	}
 
 	// Audit has entries and no command output.
 	b, _ := os.ReadFile(paths.Audit())

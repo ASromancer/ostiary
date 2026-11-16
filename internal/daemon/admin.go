@@ -62,6 +62,9 @@ func (s *Service) Begin(a *BeginArgs, r *BeginReply) error {
 	if !adminOps[a.Op] {
 		return fmt.Errorf("unknown admin op %q", a.Op)
 	}
+	if a.Op == "telegram-pair" {
+		a.Name = "" // the agent must not put text next to the bot name the human sees
+	}
 	switch a.Op {
 	case "reload", "host-set", "host-rm", "key-gen", "key-import", "key-rm", "key-export",
 		"telegram-pair", "telegram-unpair", "telegram-settings":
@@ -137,6 +140,9 @@ func (s *Service) Begin(a *BeginArgs, r *BeginReply) error {
 func (s *Service) Admin(a *AdminArgs, r *AdminReply) error {
 	d := s.d
 	defer clear(a.Pass)
+	if a.Op == "telegram-pair" {
+		a.Name = ""
+	}
 	op := a.Op + " " + a.Name
 	e := audit.Entry{Kind: "admin", Cmd: strings.TrimSpace(op), Auth: "code"}
 	var data any
@@ -228,6 +234,7 @@ func (d *Daemon) admin(a *AdminArgs, data any, r *AdminReply) error {
 			return fmt.Errorf("OS keyring unavailable (%v); choose a passphrase instead", err)
 		}
 		r.Out = "vault created: " + paths.Vault()
+		saveApproved()
 		err := d.loadConfig()
 		if err == nil {
 			err = d.unlock(key, salt)
@@ -291,6 +298,7 @@ func (d *Daemon) admin(a *AdminArgs, data any, r *AdminReply) error {
 	switch a.Op {
 	case "reload":
 		d.data.ConfigHash = ConfigHash()
+		saveApproved()
 		d.userOnly = false
 		r.Out = fmt.Sprintf("reloaded %d hosts; approvals use OS authentication", len(d.cfg.Hosts))
 		if err := d.authProblem(); err != nil {
@@ -325,6 +333,7 @@ func (d *Daemon) admin(a *AdminArgs, data any, r *AdminReply) error {
 		}
 		d.cfg = cfg
 		d.data.ConfigHash = ConfigHash()
+		saveApproved()
 		r.Out = "saved " + paths.Hosts()
 	case "key-gen":
 		if _, exists := d.data.Keys[a.Name]; exists {

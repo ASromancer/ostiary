@@ -213,6 +213,8 @@ type Options struct {
 type Status struct {
 	Paired, Pairing, AllowDestructive bool
 	Bot, User, LastError              string // User: Telegram @username of the paired account
+	PairCode                          string // the code to send while pairing; "" otherwise
+	PairExpires                       time.Time
 }
 
 type sent struct {
@@ -292,8 +294,12 @@ func (s *Service) Status() Status {
 	if le == "" {
 		le = s.lastErr
 	}
-	return Status{Paired: s.chat != 0 && s.user != 0, Pairing: s.pair != nil, AllowDestructive: s.allow,
+	st := Status{Paired: s.chat != 0 && s.user != 0, Pairing: s.pair != nil, AllowDestructive: s.allow,
 		Bot: s.botName, User: s.userName, LastError: le}
+	if s.pair != nil {
+		st.PairCode, st.PairExpires = s.pair.code, s.pair.expires
+	}
+	return st
 }
 
 // expireLocked ends a pairing whose code has run out, without waiting for a message.
