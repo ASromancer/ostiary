@@ -137,3 +137,30 @@ func TestForwardTTL(t *testing.T) {
 		t.Fatal("listener still open after TTL")
 	}
 }
+
+func TestForwardConnCap(t *testing.T) {
+	p, tg := newPoolTarget(t)
+	tn, err := p.Forward(tg, echoServer(t), time.Minute, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tn.Close()
+	var cs []net.Conn
+	for i := 0; i < MaxConns; i++ {
+		c, err := net.Dial("tcp", tn.Addr())
+		if err != nil {
+			t.Fatal(err)
+		}
+		cs = append(cs, c)
+		c.Write([]byte("x"))
+		io.ReadFull(c, make([]byte, 1)) // wait until the slot is surely taken
+	}
+	extra, _ := net.Dial("tcp", tn.Addr())
+	extra.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := extra.Read(make([]byte, 1)); err != io.EOF {
+		t.Fatalf("extra connection not refused: %v", err)
+	}
+	for _, c := range cs {
+		c.Close()
+	}
+}

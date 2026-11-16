@@ -162,3 +162,31 @@ func TestDrainClosesTunnels(t *testing.T) {
 		t.Fatalf("open while draining: %+v", r)
 	}
 }
+
+func TestFmtTTL(t *testing.T) {
+	for d, want := range map[time.Duration]string{
+		30 * time.Second: "30s", 10 * time.Minute: "10m", 20 * time.Minute: "20m", time.Hour: "1h",
+		90 * time.Minute: "1h30m", 8 * time.Hour: "8h", 5*time.Minute + 30*time.Second: "5m30s",
+	} {
+		if got := fmtTTL(d); got != want {
+			t.Errorf("%s: %q want %q", d, got, want)
+		}
+	}
+}
+
+func TestTunnelMinTTLAndNoApprovalSteal(t *testing.T) {
+	target := echo(t)
+	h := tunnelHarness(t, target)
+	if r := h.tunnel(TunnelArgs{Target: target, TTL: time.Second}); r.Code != CodeBlocked || !strings.Contains(r.Msg, "too short") || len(h.d.q.Pending()) != 0 {
+		t.Fatalf("%+v", r)
+	}
+	// a decided request for another command must survive a tunnel call that quotes its id
+	ex := h.exec(ExecArgs{Env: Env{Agent: "codex"}, Cmd: "sh -c 'exit 3'"})
+	h.call("Decide", &DecideArgs{ID: ex.Pending, Code: h.lastCode(), Choice: "y"}, &Empty{})
+	if r := h.tunnel(TunnelArgs{Target: target, ApprovalID: ex.Pending}); r.Code != CodeDenied {
+		t.Fatalf("%+v", r)
+	}
+	if r := h.exec(ExecArgs{Env: Env{Agent: "codex"}, Cmd: "sh -c 'exit 3'", ApprovalID: ex.Pending}); r.Code != 0 || r.Exit != 3 {
+		t.Fatalf("approval was consumed: %+v", r)
+	}
+}

@@ -274,6 +274,17 @@ func (q *Queue) Resolve(id int, choice, msg, auth string) (Decision, error) {
 	return d, nil
 }
 
+// Peek returns request id even once decided (until its waiter collects it), without consuming it.
+func (q *Queue) Peek(id int) (Request, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	e, ok := q.pending[id]
+	if !ok {
+		return Request{}, false
+	}
+	return e.req, true
+}
+
 // Get returns a pending, undecided request.
 func (q *Queue) Get(id int) (Request, bool) {
 	q.mu.Lock()

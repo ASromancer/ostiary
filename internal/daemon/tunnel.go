@@ -17,6 +17,7 @@ import (
 
 const (
 	DefaultTunnelTTL = time.Hour
+	MinTunnelTTL     = time.Minute
 	MaxTunnelTTL     = 8 * time.Hour
 )
 
@@ -54,9 +55,18 @@ type tunnelEntry struct {
 }
 
 func fmtTTL(d time.Duration) string {
-	s := d.Round(time.Second).String()
-	s = strings.TrimSuffix(s, "0s")
-	return strings.TrimSuffix(s, "0m")
+	d = d.Round(time.Second)
+	h, m, sec := int(d/time.Hour), int(d%time.Hour/time.Minute), int(d%time.Minute/time.Second)
+	var b strings.Builder
+	for _, u := range []struct {
+		n int
+		s string
+	}{{h, "h"}, {m, "m"}, {sec, "s"}} {
+		if u.n > 0 {
+			fmt.Fprintf(&b, "%d%s", u.n, u.s)
+		}
+	}
+	return b.String()
 }
 
 func tunnelCmd(host, target string, ttl time.Duration) string {
@@ -71,6 +81,9 @@ func (d *Daemon) addTunnel(e *tunnelEntry) bool {
 	}
 	d.mu.Lock()
 	d.tunnels[e.ID] = e
+	if e.t.Closed() { // its timer fired before registration; onClose's delete already ran
+		delete(d.tunnels, e.ID)
+	}
 	d.mu.Unlock()
 	return true
 }
@@ -136,7 +149,17 @@ func (s *Service) TunnelOpen(a *TunnelArgs, r *TunnelReply) error {
 	if ttl <= 0 {
 		ttl = DefaultTunnelTTL
 	}
+	if ttl < MinTunnelTTL {
+		r.Code, r.Msg = CodeBlocked, fmt.Sprintf("ttl %s is too short; the minimum is %s", ttl, MinTunnelTTL)
+		return nil
+	}
 	ttl = min(ttl, MaxTunnelTTL)
+	target, err := hosts.NormalizeTarget(a.Target)
+	if err != nil {
+		r.Code, r.Msg = CodeBlocked, err.Error()
+		return nil
+	}
+	a.Target = target
 	display := tunnelCmd(a.Host, a.Target, ttl)
 	r.Level = "destructive"
 	e := audit.Entry{Kind: "tunnel", Agent: a.Agent, Cwd: a.Cwd, Repo: repoDir, Host: a.Host, Cmd: display, Level: r.Level}
@@ -154,6 +177,11 @@ func (s *Service) TunnelOpen(a *TunnelArgs, r *TunnelReply) error {
 			Repo: repoDir, Agent: a.Agent, Kind: "tunnel", Cmd: display, Level: r.Level})
 		d.cancelIfDraining()
 		r.Pending, r.ID = id, id
+		return nil
+	}
+	// check the id belongs to this request before WaitFor consumes the decision
+	if p, ok := d.q.Peek(a.ApprovalID); !ok || p.Host != a.Host || p.Cmd != display || p.Kind != "tunnel" {
+		r.Code, r.Msg = CodeDenied, "unknown or expired approval request; stop and ask the user"
 		return nil
 	}
 	req, dec, done, ok := d.q.WaitFor(a.ApprovalID, a.WaitMax)
@@ -210,10 +238,10 @@ func (s *Service) TunnelOpen(a *TunnelArgs, r *TunnelReply) error {
 		if err == nil {
 			te.Local = te.t.Addr()
 			if !d.addTunnel(te) { // a drain began meanwhile
+				e.Note = "ostiary began restarting right after approval; tunnel closed at once"
+				d.log.Write(e) // approved, then closed: keeps the log in order
 				te.reason.Store("restart")
 				te.t.Close()
-				e.Decision, e.Note = "cancelled", "restart"
-				d.log.Write(e)
 				r.Code, r.Msg = CodeRestarting, restartingMsg
 				return nil
 			}

@@ -173,6 +173,11 @@ func (s *Service) Exec(a *ExecArgs, r *ExecReply) error {
 	case policy.Approve:
 		switch {
 		case a.ApprovalID != 0:
+			// check the id belongs to this request before WaitFor consumes the decision
+			if p, ok := d.q.Peek(a.ApprovalID); !ok || p.Host != a.Host || p.Cmd != display || p.Kind != a.Kind {
+				r.Code, r.Msg = CodeDenied, "unknown or expired approval request; stop and ask the user"
+				return nil
+			}
 			req, dec, done, ok := d.q.WaitFor(a.ApprovalID, a.WaitMax)
 			if ok && !done && req.Host == a.Host && req.Cmd == display && req.Kind == a.Kind {
 				r.Pending, r.ID = a.ApprovalID, a.ApprovalID // still waiting for the human

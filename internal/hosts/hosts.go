@@ -74,13 +74,25 @@ func (h *Host) Validate() error {
 	if h.Profile != "" && !policy.ValidProfile(h.Profile) {
 		return fmt.Errorf("unknown profile %q (readonly|strict|standard|full)", h.Profile)
 	}
-	for _, t := range h.Tunnels {
-		host, port, err := net.SplitHostPort(t)
-		if n, perr := strconv.Atoi(port); err != nil || host == "" || perr != nil || n < 1 || n > 65535 {
-			return fmt.Errorf("bad tunnel target %q (want host:port, port 1-65535)", t)
+	for i, t := range h.Tunnels {
+		n, err := NormalizeTarget(t)
+		if err != nil {
+			return err
 		}
+		h.Tunnels[i] = n
 	}
 	return nil
+}
+
+// NormalizeTarget trims a tunnel target and lowercases its host. It must be host:port, port 1-65535, no spaces.
+func NormalizeTarget(t string) (string, error) {
+	t = strings.TrimSpace(t)
+	host, port, err := net.SplitHostPort(t)
+	n, perr := strconv.Atoi(port)
+	if err != nil || host == "" || perr != nil || n < 1 || n > 65535 || strings.ContainsAny(t, " \t\r\n") {
+		return "", fmt.Errorf("bad tunnel target %q (want host:port, port 1-65535)", t)
+	}
+	return net.JoinHostPort(strings.ToLower(host), strconv.Itoa(n)), nil
 }
 
 func (c *Config) Save(path string) error {

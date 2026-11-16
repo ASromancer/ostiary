@@ -1,11 +1,20 @@
 package sshconn
 
 import (
+	"errors"
 	"io"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/crypto/ssh"
+)
+
+const (
+	// MaxConns is the most concurrent connections one tunnel forwards; extra ones are refused.
+	MaxConns    = 32
+	DialTimeout = 10 * time.Second
 )
 
 // Stats is a tunnel's traffic. BytesOut goes toward the remote target.
@@ -21,6 +30,15 @@ type Tunnel struct {
 	once    sync.Once
 	mu      sync.Mutex
 	active  map[net.Conn]struct{}
+	closed  bool
+	slots   chan struct{} // limits concurrent connections
+}
+
+// Closed reports whether Close has begun.
+func (t *Tunnel) Closed() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.closed
 }
 
 func (t *Tunnel) Addr() string { return t.ln.Addr().String() }
@@ -34,6 +52,7 @@ func (t *Tunnel) Close() {
 	t.once.Do(func() {
 		t.ln.Close()
 		t.mu.Lock()
+		t.closed = true
 		t.timer.Stop()
 		for c := range t.active {
 			c.Close()
@@ -56,7 +75,7 @@ func (p *Pool) Forward(tg Target, remote string, ttl time.Duration, onClose func
 	if err != nil {
 		return nil, err
 	}
-	t := &Tunnel{ln: ln, onClose: onClose, active: map[net.Conn]struct{}{}}
+	t := &Tunnel{ln: ln, onClose: onClose, active: map[net.Conn]struct{}{}, slots: make(chan struct{}, MaxConns)}
 	t.mu.Lock() // Close may fire at once and reads t.timer under mu
 	t.timer = time.AfterFunc(ttl, t.Close)
 	t.mu.Unlock()
@@ -66,7 +85,19 @@ func (p *Pool) Forward(tg Target, remote string, ttl time.Duration, onClose func
 			if err != nil {
 				return
 			}
+			select {
+			case t.slots <- struct{}{}:
+			default:
+				lc.Close() // too many connections
+				continue
+			}
 			t.mu.Lock()
+			if t.closed { // accepted while closing: Close has already swept t.active
+				t.mu.Unlock()
+				lc.Close()
+				<-t.slots
+				return
+			}
 			t.active[lc] = struct{}{}
 			t.mu.Unlock()
 			t.conns.Add(1)
@@ -76,8 +107,9 @@ func (p *Pool) Forward(tg Target, remote string, ttl time.Duration, onClose func
 					t.mu.Lock()
 					delete(t.active, lc)
 					t.mu.Unlock()
+					<-t.slots
 				}()
-				rc, err := c.Dial("tcp", remote)
+				rc, err := dialTimeout(c, remote)
 				if err != nil {
 					return
 				}
@@ -109,4 +141,25 @@ func (c *counter) Write(b []byte) (int, error) {
 	m, err := c.w.Write(b)
 	c.n.Add(int64(m))
 	return m, err
+}
+
+// dialTimeout is c.Dial with a deadline, which ssh.Client lacks.
+func dialTimeout(c *ssh.Client, addr string) (net.Conn, error) {
+	type res struct {
+		c   net.Conn
+		err error
+	}
+	ch := make(chan res, 1)
+	go func() { x, err := c.Dial("tcp", addr); ch <- res{x, err} }()
+	select {
+	case r := <-ch:
+		return r.c, r.err
+	case <-time.After(DialTimeout):
+		go func() {
+			if r := <-ch; r.c != nil {
+				r.c.Close()
+			}
+		}()
+		return nil, errors.New("dial timeout")
+	}
 }
