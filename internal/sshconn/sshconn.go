@@ -129,6 +129,11 @@ func (p *Pool) client(t Target) (*ssh.Client, error) {
 		return nil, err
 	}
 	p.mu.Lock()
+	if other := p.conns[t.Name]; other != nil { // a concurrent caller redialled first: keep one
+		p.mu.Unlock()
+		c.Close()
+		return other, nil
+	}
 	p.conns[t.Name] = c
 	p.mu.Unlock()
 	return c, nil
