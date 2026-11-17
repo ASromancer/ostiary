@@ -120,7 +120,7 @@ func classify(stage string, err error) (code, msg string) {
 		return "hostkey-unknown", "host key not trusted yet: " + raw
 	case strings.Contains(l, "unable to authenticate"):
 		return "auth", "unable to authenticate (wrong user, key or password?): " + raw
-	case strings.Contains(l, "connection refused"):
+	case strings.Contains(l, "connection refused"), strings.Contains(l, "actively refused"): // Windows wording
 		return "refused", "connection refused (nothing listens on that port, or a firewall rejects it): " + raw
 	case strings.Contains(l, "no route to host"), strings.Contains(l, "network is unreachable"):
 		return "no-route", "no route to host (wrong address, VPN down?): " + raw

@@ -39,6 +39,7 @@ import (
 const outRetention = 7 * 24 * time.Hour
 
 type Daemon struct {
+	calls    atomic.Int64 // RPC calls between request read and reply written
 	mu       sync.Mutex
 	ln       net.Listener // set by ServeListener; closed by Shutdown
 	engine   *policy.Engine
@@ -438,6 +439,7 @@ func (d *Daemon) Serve(ln net.Listener) error {
 	go d.updateLoop(uctx)
 	log.Printf("ostiary daemon listening on %s", sock)
 	err := d.ServeListener(ln)
+	d.waitCalls(5 * time.Second) // let replies to drained commands reach their callers
 	if !d.restarting.Load() {
 		os.Remove(sock)
 	}
@@ -467,7 +469,34 @@ func (d *Daemon) ServeListener(ln net.Listener) error {
 			c.Close()
 			continue
 		}
-		go srv.ServeCodec(jsonrpc.NewServerCodec(c))
+		go srv.ServeCodec(&countingCodec{ServerCodec: jsonrpc.NewServerCodec(c), n: &d.calls})
+	}
+}
+
+// countingCodec counts RPC calls from request read to reply written, so a
+// stopping daemon can wait until replies to finished commands are sent.
+type countingCodec struct {
+	rpc.ServerCodec
+	n *atomic.Int64
+}
+
+func (c *countingCodec) ReadRequestHeader(r *rpc.Request) error {
+	err := c.ServerCodec.ReadRequestHeader(r)
+	if err == nil {
+		c.n.Add(1)
+	}
+	return err
+}
+
+func (c *countingCodec) WriteResponse(r *rpc.Response, body any) error {
+	defer c.n.Add(-1)
+	return c.ServerCodec.WriteResponse(r, body)
+}
+
+// waitCalls waits up to max for in-flight RPC replies to be written.
+func (d *Daemon) waitCalls(max time.Duration) {
+	for end := time.Now().Add(max); d.calls.Load() > 0 && time.Now().Before(end); {
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
