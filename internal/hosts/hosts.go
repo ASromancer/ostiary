@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -175,6 +176,45 @@ func (c *Config) Visible(r *Repo) map[string]string {
 		out[name] = p
 	}
 	return out
+}
+
+// Resolve maps the name an agent typed to a configured host name: an exact
+// match, else the one host that differs only in case. Two such hosts are ambiguous, so no match.
+func (c *Config) Resolve(name string) (string, bool) {
+	if _, ok := c.Hosts[name]; ok {
+		return name, true
+	}
+	found := ""
+	for n := range c.Hosts {
+		if strings.EqualFold(n, name) {
+			if found != "" {
+				return "", false
+			}
+			found = n
+		}
+	}
+	return found, found != ""
+}
+
+// Pick resolves name among the hosts an agent may use. It returns the
+// configured name and effective profile, or the message to show the agent.
+func (c *Config) Pick(r *Repo, name string) (canon, profile, msg string) {
+	vis := c.Visible(r)
+	if canon, ok := c.Resolve(name); ok {
+		if profile, ok := vis[canon]; ok {
+			return canon, profile, ""
+		}
+	}
+	names := make([]string, 0, len(vis))
+	for n := range vis {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	msg = fmt.Sprintf("host %q is not available to agents here", name)
+	if len(names) > 0 {
+		msg += "; available: " + strings.Join(names, ", ")
+	}
+	return "", "", msg
 }
 
 // ImportSSHConfig reads concrete Host entries from an OpenSSH client config.

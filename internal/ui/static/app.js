@@ -15,7 +15,7 @@ const VIEWS = { setup: "Bắt đầu", approvals: "Duyệt", hosts: "Host", keyc
 let status = null;
 let auditOffset = 0;
 let view = "approvals";
-let hostData = { Hosts: {}, Trusted: {} };
+let hostData = { Hosts: {}, Trusted: {}, Checks: {} };
 
 // ---- icons (createElementNS, stroke style) ----
 const ICONS = {
@@ -880,6 +880,116 @@ async function admin(op, name, extra) {
   }
 }
 
+// ---- check:begin (also loaded by internal/ui/testdata/check_test.mjs) ----
+const CHECK_STAGES = [["tcp", "Kết nối TCP"], ["hostkey", "Host key"], ["auth", "Xác thực"], ["exec", "Chạy lệnh"]];
+const CHECK_WHY = { // failure code -> short Vietnamese explanation
+  refused: "cổng bị từ chối kết nối",
+  timeout: "hết thời gian chờ (máy tắt hoặc firewall chặn)",
+  "no-route": "không có đường tới máy (sai địa chỉ, VPN tắt?)",
+  dns: "không phân giải được tên máy",
+  "hostkey-unknown": "host key chưa được tin",
+  "hostkey-changed": "host key ĐÃ ĐỔI",
+  "handshake-timeout": "máy nhận kết nối nhưng không trả lời SSH",
+  auth: "sai user, key hoặc mật khẩu?",
+  exec: "đăng nhập được nhưng không chạy được lệnh",
+};
+const CHECK_HINT = {
+  tcp: "Kiểm tra địa chỉ/port, firewall, VPN.",
+  hostkey: "Bấm Trust host key.",
+  auth: "Kiểm tra user và key/mật khẩu trong Kho khóa.",
+  exec: "Đăng nhập được nhưng không chạy được lệnh.",
+};
+function checkWhy(st) { return CHECK_WHY[st.code] || st.err || "lỗi"; }
+const pad2 = (n) => String(n).padStart(2, "0");
+function checkTip(c) { // tooltip for the status dot
+  if (!c) return "Chưa kiểm tra kết nối";
+  const t = new Date(c.At);
+  const when = "Kiểm tra lúc " + pad2(t.getHours()) + ":" + pad2(t.getMinutes()) + ": ";
+  if (c.OK) return when + "kết nối tốt";
+  const bad = (c.Stages || []).find((x) => !x.ok) || { stage: "?" };
+  return when + bad.stage + " lỗi — " + checkWhy(bad);
+}
+// ---- check:end ----
+const checking = new Set(); // hosts with a check in flight
+function paintDot(d) {
+  const n = d.dataset.host, c = (hostData.Checks || {})[n];
+  d.className = "sdot " + (checking.has(n) ? "run" : !c ? "unk" : c.OK ? "ok" : "bad");
+  d.title = checking.has(n) ? "Đang kiểm tra…" : checkTip(c);
+  d.setAttribute("aria-label", d.title);
+}
+const paintDots = () => document.querySelectorAll(".sdot[data-host]").forEach(paintDot);
+function statusDot(name) {
+  const d = el("span");
+  d.dataset.host = name;
+  d.setAttribute("role", "img");
+  paintDot(d);
+  return d;
+}
+async function checkHost(name) {
+  checking.add(name);
+  paintDots();
+  try {
+    const r = await call("POST", "/api/hosts/" + encodeURIComponent(name) + "/check");
+    if (r.Code) throw new Error(r.Msg || "Không kiểm tra được");
+    hostData.Checks = hostData.Checks || {};
+    return (hostData.Checks[name] = { At: r.At, OK: r.OK, Stages: r.Stages });
+  } finally { checking.delete(name); paintDots(); }
+}
+// The four stages with tick/cross, timing and, for a failure, the explanation and what to do.
+function renderCheck(c) {
+  const ul = el("ul", "checklist");
+  CHECK_STAGES.forEach(([id, label]) => {
+    const st = (c.Stages || []).find((x) => x.stage === id);
+    const li = el("li", st ? (st.ok ? "ok" : "bad") : "skip");
+    li.appendChild(icon(st ? (st.ok ? "check" : "x") : "more"));
+    const body = el("div", "cbody");
+    const head = el("div", "chead");
+    head.appendChild(el("b", null, label));
+    if (st && st.ok) head.appendChild(el("span", "muted", st.ms + " ms"));
+    if (!st) head.appendChild(el("span", "muted", "chưa chạy"));
+    body.appendChild(head);
+    if (st && !st.ok) {
+      body.appendChild(el("div", "cwhy", checkWhy(st)));
+      body.appendChild(el("div", "chint", CHECK_HINT[id]));
+      if (st.err) body.appendChild(el("code", "craw", st.err));
+    }
+    li.appendChild(body);
+    ul.appendChild(li);
+  });
+  return ul;
+}
+async function showCheck(name) {
+  const layer = openLayer("modal", "Kiểm tra kết nối · " + name);
+  const out = el("div");
+  layer.body.appendChild(out);
+  const close = button("Đóng", "ghost");
+  close.addEventListener("click", layer.close);
+  const again = button("Kiểm tra lại", "primary", "refresh");
+  layer.foot.append(close, again);
+  const run = async () => {
+    out.replaceChildren(el("p", "muted", "Đang kiểm tra… (tối đa 25 giây)"));
+    again.disabled = true;
+    try {
+      const c = await checkHost(name);
+      if (layer.closed) return;
+      out.replaceChildren(el("p", c.OK ? "okline" : "badline", c.OK ? "Kết nối tốt: cả 4 bước đều qua." : "Kết nối lỗi."), renderCheck(c));
+    } catch (e) {
+      if (!layer.closed) out.replaceChildren(el("p", "badline", friendlyError(e.message)));
+    } finally { again.disabled = false; }
+  };
+  again.addEventListener("click", run);
+  layer.focusFirst();
+  await run();
+}
+async function checkAll() {
+  const names = Object.keys(hostData.Hosts);
+  if (!names.length) return;
+  const res = await Promise.allSettled(names.map(checkHost));
+  const good = res.filter((r) => r.status === "fulfilled" && r.value.OK).length;
+  toast(good + "/" + names.length + " host kết nối tốt", good === names.length ? "ok" : "warn");
+}
+$("hostcheck").addEventListener("click", (e) => busy(e.currentTarget, checkAll));
+
 // ---- hosts ----
 function hashHue(s) { let h = 0; for (const ch of s) h = (h * 31 + ch.codePointAt(0)) >>> 0; return h % 360; }
 function initials(name) {
@@ -929,7 +1039,9 @@ function hostCard(name, h) {
   const av = el("div", "avatar", initials(name));
   av.style.setProperty("--h", String(hashHue(name)));
   const main = el("div", "main");
-  main.append(el("div", "name", name), el("div", "sub", addrOf(h)));
+  const nm = el("div", "name");
+  nm.append(statusDot(name), document.createTextNode(name));
+  main.append(nm, el("div", "sub", addrOf(h)));
   main.title = addrOf(h) + (h.description ? "\n" + h.description : "");
   main.tabIndex = 0;
   main.setAttribute("role", "button");
@@ -944,6 +1056,7 @@ function hostCard(name, h) {
     e.stopPropagation();
     menu(kb, [
       ["Sửa", "pencil", () => openHostDrawer(name, h).catch(fail)],
+      ["Kiểm tra kết nối", "refresh", () => showCheck(name).catch(fail)],
       ["Tin host key", "shieldcheck", () => trustHost(name)],
       ["Sao chép user@host", "copy", () => copyText((h.user ? h.user + "@" : "") + h.host)],
       null,
@@ -1114,6 +1227,20 @@ function chipInput(initial, placeholder, label) {
   return { node: wrap, input: inp, get: () => { add(inp.value); inp.value = ""; return items.slice(); } };
 }
 
+// "Kiểm tra kết nối" block of the host drawer: tests the saved configuration, not unsaved edits.
+function checkSection(name) {
+  const box = el("div", "checksec");
+  const res = el("div");
+  const b = button("Kiểm tra kết nối", "", "refresh");
+  const show = (c) => res.replaceChildren(el("p", "muted", checkTip(c)), renderCheck(c));
+  b.addEventListener("click", () => busy(b, async () => show(await checkHost(name))));
+  const head = el("div", "chead");
+  head.append(el("b", null, "Kết nối"), b);
+  box.append(head, el("div", "hint", "Thử kết nối bằng cấu hình đã lưu (không phải phần bạn đang sửa)."), res);
+  const last = (hostData.Checks || {})[name];
+  if (last) show(last);
+  return box;
+}
 async function openHostDrawer(name, h) {
   if (!(await needVault())) return;
   let locked = false;
@@ -1179,6 +1306,7 @@ async function openHostDrawer(name, h) {
     return i < 1 || !/^[A-Za-z0-9._:\[\]-]+$/.test(host) || !/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65535;
   };
   form.append(fName, row, fUser, fKey, fProf, fAgent, fDesc, fAllow, fDeny, fTun);
+  if (name) layer.body.appendChild(checkSection(name));
   layer.body.appendChild(form);
   let dirty = false;
   ["input", "change"].forEach((t) => form.addEventListener(t, () => { dirty = true; }));

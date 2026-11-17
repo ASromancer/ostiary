@@ -83,3 +83,31 @@ func TestTunnelsNormalize(t *testing.T) {
 		t.Fatalf("%v %v", err, h.Tunnels)
 	}
 }
+
+func TestResolveAndPick(t *testing.T) {
+	c := &Config{Hosts: map[string]*Host{
+		"iCortex-app": {Host: "a", Agent: true},
+		"db":          {Host: "b", Agent: true},
+		"DB":          {Host: "c", Agent: true},
+		"hidden":      {Host: "d"},
+	}}
+	if n, ok := c.Resolve("icortex-APP"); !ok || n != "iCortex-app" {
+		t.Fatal(n, ok)
+	}
+	if n, ok := c.Resolve("db"); !ok || n != "db" { // exact wins
+		t.Fatal(n, ok)
+	}
+	if _, ok := c.Resolve("Db"); ok { // ambiguous
+		t.Fatal("ambiguous name resolved")
+	}
+	if n, p, msg := c.Pick(nil, "ICORTEX-APP"); n != "iCortex-app" || p != "standard" || msg != "" {
+		t.Fatal(n, p, msg)
+	}
+	_, _, msg := c.Pick(nil, "x")
+	if msg != `host "x" is not available to agents here; available: DB, db, iCortex-app` {
+		t.Fatal(msg)
+	}
+	if _, _, msg := c.Pick(nil, "hidden"); msg == "" {
+		t.Fatal("hidden host picked")
+	}
+}

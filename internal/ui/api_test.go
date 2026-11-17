@@ -398,3 +398,22 @@ func TestAPIReloadBeginCarriesReviewedHash(t *testing.T) {
 		t.Fatalf("%+v", f.begun)
 	}
 }
+
+func TestAPIHostCheck(t *testing.T) {
+	s := newServer(Options{Backend: &fakeBackend{}, Version: "9.9"}, 8123)
+	if w := api(t, s, "POST", "/api/hosts/web1/check", "{}"); w.Code != 200 || !strings.Contains(w.Body.String(), `"OK":true`) {
+		t.Fatalf("check: %d %s", w.Code, w.Body.String())
+	}
+	if w := api(t, s, "POST", "/api/hosts/ghost/check", "{}"); w.Code != 400 {
+		t.Fatalf("unknown: %d", w.Code)
+	}
+	if w := do(t, s, "POST", "/api/hosts/web1/check", apiHost, apiOrigin, "", "application/json", "{}"); w.Code != 401 {
+		t.Fatalf("no cookie: %d", w.Code)
+	}
+	if w := do(t, s, "POST", "/api/hosts/web1/check", apiHost, "", session(t, s), "application/json", "{}"); w.Code != 403 {
+		t.Fatalf("no origin: %d", w.Code)
+	}
+	if w := do(t, s, "POST", "/api/hosts/web1/check", apiHost, apiOrigin, session(t, s), "text/plain", "{}"); w.Code == 200 {
+		t.Fatal("non-JSON accepted")
+	}
+}

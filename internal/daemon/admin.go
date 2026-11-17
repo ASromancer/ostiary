@@ -187,6 +187,12 @@ func (s *Service) Admin(a *AdminArgs, r *AdminReply) error {
 		return err
 	}
 	d.log.Write(e)
+	switch a.Op { // a changed host or credential must not keep using the old connection
+	case "host-set", "host-rm":
+		d.dropConns(a.Name)
+	case "key-rm", "key-import":
+		d.dropConns(d.hostsUsingKey(a.Name)...)
+	}
 	d.pruneTunnels() // host-set/host-rm/key-rm may have taken away what a tunnel relies on
 	return nil
 }

@@ -7,6 +7,7 @@ import (
 	"github.com/ASromancer/ostiary/internal/approval"
 	"github.com/ASromancer/ostiary/internal/daemon"
 	"github.com/ASromancer/ostiary/internal/hosts"
+	"github.com/ASromancer/ostiary/internal/sshconn"
 )
 
 type fakeBackend struct {
@@ -46,6 +47,12 @@ func (f *fakeBackend) Decide(a daemon.DecideArgs) error {
 func (f *fakeBackend) HostList() (daemon.HostListReply, error) {
 	return daemon.HostListReply{Hosts: map[string]hosts.Host{"web1": {Host: "10.0.0.5", User: "deploy", Agent: true}},
 		Trusted: map[string]bool{"web1": true}}, nil
+}
+func (f *fakeBackend) HostCheck(name string) (daemon.CheckReply, error) {
+	if name != "web1" {
+		return daemon.CheckReply{}, errors.New("unknown host \"" + name + "\"")
+	}
+	return daemon.CheckReply{Host: name, CheckInfo: daemon.CheckInfo{OK: true, Stages: []sshconn.Stage{{Stage: "tcp", OK: true, Ms: 2}}}}, nil
 }
 func (f *fakeBackend) Begin(a daemon.BeginArgs) (daemon.BeginReply, error) {
 	f.mu.Lock()

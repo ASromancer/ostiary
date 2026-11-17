@@ -13,6 +13,7 @@ type Backend interface {
 	Pending() ([]approval.Request, error)
 	Decide(a daemon.DecideArgs) error
 	HostList() (daemon.HostListReply, error)
+	HostCheck(name string) (daemon.CheckReply, error)
 	Begin(a daemon.BeginArgs) (daemon.BeginReply, error)
 	Admin(a daemon.AdminArgs) (daemon.AdminReply, error)
 	Unlock(pass string) error
@@ -39,6 +40,10 @@ func (b ServiceBackend) Pending() (r []approval.Request, err error) {
 func (b ServiceBackend) Decide(a daemon.DecideArgs) error { return b.S.Decide(&a, &daemon.Empty{}) }
 func (b ServiceBackend) HostList() (r daemon.HostListReply, err error) {
 	err = b.S.HostList(&daemon.Empty{}, &r)
+	return
+}
+func (b ServiceBackend) HostCheck(name string) (r daemon.CheckReply, err error) {
+	err = b.S.HostCheck(&daemon.CheckArgs{Host: name}, &r)
 	return
 }
 func (b ServiceBackend) Begin(a daemon.BeginArgs) (r daemon.BeginReply, err error) {

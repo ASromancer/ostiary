@@ -27,6 +27,7 @@ For agents:
   ostiary put <local-path> <host>:<remote-path>
   ostiary job start <host> "<cmd>" | job tail <id> [--lines N] | job kill <id>
   ostiary tunnel open <host> <host:port> [--ttl 1h] | tunnel list | tunnel close <id>
+  ostiary check <host> | check --all  test the connection (tcp, host key, auth, exec); use it when a command hangs or fails to connect
   ostiary explain "<cmd>" [--host <host>]
   ostiary mcp [--cwd <dir>]          stdio MCP server with the same tools
 
@@ -76,7 +77,7 @@ func Main(args []string) int {
 	cleanOldBinaries()
 	cmds := map[string]func([]string) int{
 		"hosts": cmdHosts, "run": cmdRun, "out": cmdOut, "get": cmdGet, "put": cmdPut,
-		"job": cmdJob, "tunnel": cmdTunnel, "explain": cmdExplain, "hook": cmdHook,
+		"job": cmdJob, "tunnel": cmdTunnel, "explain": cmdExplain, "check": cmdCheck, "hook": cmdHook,
 		"init": cmdInit, "unlock": cmdUnlock, "lock": cmdLock, "approve": cmdApprove,
 		"reload": cmdReload, "host": cmdHost, "key": cmdKey, "log": cmdLog, "doctor": cmdDoctor, "ui": cmdUI,
 		"install-hooks": cmdInstallHooks, "daemon": cmdDaemon, "install-polkit": cmdInstallPolkit, "install-service": cmdInstallService, "uninstall-service": cmdUninstallService, "mcp": cmdMCP, "open": cmdOpen, "stop": cmdStop, "upgrade": cmdUpgrade,
