@@ -53,16 +53,28 @@ func (e *HostKeyError) Error() string {
 	return fmt.Sprintf("unknown host key for %s; the user must run 'ostiary host trust %s'", e.Name, e.Name)
 }
 
-func (p *Pool) client(t Target) (*ssh.Client, error) {
-	p.mu.Lock()
-	c := p.conns[t.Name]
-	p.mu.Unlock()
-	if c != nil {
-		if _, _, err := c.SendRequest("keepalive@openssh.com", true, nil); err == nil {
-			return c, nil
-		}
-		p.Drop(t.Name)
+// Timeouts are variables so tests can shrink them.
+var (
+	keepaliveTimeout = 5 * time.Second
+	tcpTimeout       = 15 * time.Second
+	handshakeTimeout = 20 * time.Second
+)
+
+// alive sends a keepalive and gives the peer keepaliveTimeout to answer; a
+// half-open connection never does, so a bare SendRequest would hang forever.
+func alive(c *ssh.Client) bool {
+	ch := make(chan error, 1)
+	go func() { _, _, err := c.SendRequest("keepalive@openssh.com", true, nil); ch <- err }()
+	select {
+	case err := <-ch:
+		return err == nil
+	case <-time.After(keepaliveTimeout):
+		return false
 	}
+}
+
+// hostKeyCheck is the strict known_hosts callback; it turns knownhosts' key errors into *HostKeyError.
+func (p *Pool) hostKeyCheck(name string) (ssh.HostKeyCallback, error) {
 	if f, err := os.OpenFile(p.KnownHosts, os.O_CREATE|os.O_RDONLY, 0o600); err == nil {
 		f.Close()
 	}
@@ -70,20 +82,49 @@ func (p *Pool) client(t Target) (*ssh.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg := &ssh.ClientConfig{
-		User:    t.User,
-		Auth:    []ssh.AuthMethod{t.Auth},
-		Timeout: 15 * time.Second,
-		HostKeyCallback: func(host string, remote net.Addr, key ssh.PublicKey) error {
-			err := check(host, remote, key)
-			var ke *knownhosts.KeyError
-			if errors.As(err, &ke) {
-				return &HostKeyError{Name: t.Name, Changed: len(ke.Want) > 0}
-			}
-			return err
-		},
+	return func(host string, remote net.Addr, key ssh.PublicKey) error {
+		err := check(host, remote, key)
+		var ke *knownhosts.KeyError
+		if errors.As(err, &ke) {
+			return &HostKeyError{Name: name, Changed: len(ke.Want) > 0}
+		}
+		return err
+	}, nil
+}
+
+// handshake runs the SSH handshake on conn within timeout; a server that
+// stalls after the TCP connect cannot hang it. conn is closed on failure.
+func handshake(conn net.Conn, addr string, cfg *ssh.ClientConfig, timeout time.Duration) (*ssh.Client, error) {
+	conn.SetDeadline(time.Now().Add(timeout))
+	sc, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
+	if err != nil {
+		conn.Close()
+		return nil, err
 	}
-	c, err = ssh.Dial("tcp", t.Addr, cfg)
+	conn.SetDeadline(time.Time{})
+	return ssh.NewClient(sc, chans, reqs), nil
+}
+
+func (p *Pool) client(t Target) (*ssh.Client, error) {
+	p.mu.Lock()
+	c := p.conns[t.Name]
+	p.mu.Unlock()
+	if c != nil {
+		if alive(c) {
+			return c, nil
+		}
+		p.drop(t.Name, c)
+	}
+	cb, err := p.hostKeyCheck(t.Name)
+	if err != nil {
+		return nil, err
+	}
+	cfg := &ssh.ClientConfig{User: t.User, Auth: []ssh.AuthMethod{t.Auth}, HostKeyCallback: cb}
+	conn, err := net.DialTimeout("tcp", t.Addr, tcpTimeout)
+	if err != nil {
+		return nil, err
+	}
+	c, err = handshake(conn, t.Addr, cfg, handshakeTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -91,6 +132,23 @@ func (p *Pool) client(t Target) (*ssh.Client, error) {
 	p.conns[t.Name] = c
 	p.mu.Unlock()
 	return c, nil
+}
+
+// drop closes c and forgets it, unless a newer connection replaced it.
+func (p *Pool) drop(name string, c *ssh.Client) {
+	p.mu.Lock()
+	if p.conns[name] == c {
+		delete(p.conns, name)
+	}
+	p.mu.Unlock()
+	c.Close()
+}
+
+// Has reports whether a connection to name is pooled.
+func (p *Pool) Has(name string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.conns[name] != nil
 }
 
 func (p *Pool) Drop(name string) {
@@ -265,13 +323,16 @@ func FetchHostKey(addr string) (ssh.PublicKey, error) {
 	var key ssh.PublicKey
 	errGot := errors.New("got key")
 	cfg := &ssh.ClientConfig{
-		Timeout: 15 * time.Second,
 		HostKeyCallback: func(_ string, _ net.Addr, k ssh.PublicKey) error {
 			key = k
 			return errGot
 		},
 	}
-	c, err := ssh.Dial("tcp", addr, cfg)
+	conn, err := net.DialTimeout("tcp", addr, tcpTimeout)
+	if err != nil {
+		return nil, err
+	}
+	c, err := handshake(conn, addr, cfg, handshakeTimeout)
 	if c != nil {
 		c.Close()
 	}

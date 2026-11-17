@@ -14,6 +14,7 @@ You never hold SSH keys. A local daemon runs commands for you, classifies each o
 - `ostiary run <host> "<cmd>" [--timeout 60s]` — run one command (quote it as one argument).
   First line: `web1 exit=0 1.2s level=read id=57`, then output. Long output keeps the first and
   last 40 lines.
+- `ostiary check <host>` — test the connection (tcp, host key, auth, exec) and say which step fails. Run it when a command hangs or fails to connect; `check --all` tests every host. Host names match case-insensitively.
 - `ostiary out <id> --grep <regexp>` / `--range a:b` — read the full output of an earlier run.
   Use this instead of running the command again.
 - `ostiary get <host>:<remote> <local>`, `ostiary put <local> <host>:<remote>` — copy files (50 MB max).

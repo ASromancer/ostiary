@@ -9,6 +9,7 @@ import (
 	"github.com/ASromancer/ostiary/internal/hosts"
 	"github.com/ASromancer/ostiary/internal/paths"
 	"github.com/ASromancer/ostiary/internal/policy"
+	"github.com/ASromancer/ostiary/internal/sshconn"
 )
 
 // ostiary-specific exit codes (spec 6.1).
@@ -182,7 +183,27 @@ func Dial() (*rpc.Client, error) {
 // agents), for the human UI.
 type HostListReply struct {
 	Hosts   map[string]hosts.Host
-	Trusted map[string]bool // host key pinned in known_hosts
+	Trusted map[string]bool      // host key pinned in known_hosts
+	Checks  map[string]CheckInfo // last connection check per host (in memory; lost on restart)
+}
+
+// CheckInfo is the result of a connection check.
+type CheckInfo struct {
+	At     time.Time
+	OK     bool
+	Stages []sshconn.Stage
+}
+
+type CheckArgs struct {
+	Env
+	Host string
+}
+
+type CheckReply struct {
+	Code int    // CodeBlocked/CodeNoDaemon/CodeRestarting, 0 otherwise
+	Msg  string // why it did not run
+	Host string // the configured name
+	CheckInfo
 }
 
 // ApprovedHashReply is the vault's hash of the last approved config (not secret).

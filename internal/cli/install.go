@@ -242,7 +242,7 @@ const codexBlock = codexBegin + `
 ## Remote servers: ostiary
 
 Never call ssh, scp, sftp, rsync (to remote hosts) or mosh directly. Use ostiary (see the ostiary skill):
-` + "`ostiary hosts`, `ostiary run <host> \"<cmd>\"`, `ostiary out <id> --grep <re>`" + `.
+` + "`ostiary hosts`, `ostiary run <host> \"<cmd>\"`, `ostiary out <id> --grep <re>`" + `. If a command hangs or cannot connect, run ` + "`ostiary check <host>`" + `.
 Exit 100 = blocked by policy, 101 = denied by the user or timed out, 102 = daemon down or vault locked, 103 = ostiary is restarting (wait 10 s and retry the same command once).
 On 101 stop and ask the user; never retry another way. On 102 inside the sandbox, first re-run the same ostiary command outside the sandbox (escalated): the sandbox blocks ostiary's local daemon socket. Never run (also as ostiary-app) approve, key, reload, host, init, unlock, install-hooks, daemon, ui, open, stop, upgrade, install-service, uninstall-service.
 ` + codexEnd + "\n"

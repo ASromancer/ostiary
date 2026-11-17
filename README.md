@@ -81,6 +81,7 @@ ostiary get <host>:<remote-path> <local-path>
 ostiary put <local-path> <host>:<remote-path>
 ostiary job start <host> "<cmd>" | job tail <id> [--lines N] | job kill <id>
 ostiary tunnel open <host> <host:port> [--ttl 1h] | tunnel list | tunnel close <id>
+ostiary check <host> | check --all
 ostiary explain "<cmd>" [--host <host>]
 ```
 
@@ -277,6 +278,18 @@ Login links are single use (10 minutes): `ostiary ui` asks the daemon for one ov
 - OS authentication is off by default on Windows (see [Approvals](#approvals)); in code mode the codes arrive as toast notifications sent through Windows PowerShell. Admin commands read from the console (`CONIN$`).
 - Claude Code on Windows runs Bash through Git Bash. The hook also recognizes `ssh.exe`, `C:\` paths and the `%APPDATA%` directories.
 - Config lives in `%APPDATA%\ostiary`. State, logs and the socket live in `%LOCALAPPDATA%\ostiary`. Both are protected by the per-user ACL of your profile.
+
+## Troubleshooting
+
+- **A command hangs or cannot connect.** Run `ostiary check <host>` (or `check --all`). It dials the host afresh and
+  reports four stages: `tcp` (connect), `hostkey` (pinned in known_hosts), `auth` (the vault credential) and
+  `exec` (runs `true`), and stops at the first one that fails, with the reason. It is read-only, needs no approval and is
+  audited as kind `check`. The UI does the same: "Kiểm tra kết nối" on a host card or in its drawer, and
+  "Kiểm tra tất cả" in the Host view; the coloured dot on each card is the last result. A stalled connection is
+  given up after 5 s (keepalive) or 20 s (SSH handshake), and the next command dials again.
+- **Host names are matched case-insensitively.** `icortex-app` reaches `iCortex-app` when exactly one configured host
+  matches; if two hosts differ only in case, use the exact name. Audit and approvals always show the configured name.
+- Changing or removing a host, or removing or re-importing a key it uses, drops that host's open SSH connection and tunnels.
 
 ## Files
 

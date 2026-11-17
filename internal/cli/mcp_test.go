@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/ASromancer/ostiary/internal/daemon"
+	"github.com/ASromancer/ostiary/internal/sshconn"
 )
 
 // fakeDaemon answers Exec: "pending" once, then runs.
@@ -22,6 +23,8 @@ func (f *fakeDaemon) Call(method string, args, reply any) error {
 	switch method {
 	case "A.Hosts":
 		reply.(*daemon.HostsReply).Hosts = []daemon.HostInfo{{Name: "web1", Profile: "standard", Description: "prod"}}
+	case "A.Check":
+		reply.(*daemon.CheckReply).Stages = []sshconn.Stage{{Stage: "tcp", OK: true, Ms: 3}, {Stage: "hostkey", Code: "hostkey-unknown", Err: "host key not trusted yet"}}
 	case "A.Exec":
 		a := *args.(*daemon.ExecArgs)
 		f.mu.Lock()
@@ -52,6 +55,7 @@ func TestMCP(t *testing.T) {
 		`{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"run","arguments":{"host":"web1","command":"rm x"}}}`,
 		`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"run","arguments":{"host":"web1","command":"rm x","approval_id":7}}}`,
 		`{"jsonrpc":"2.0","id":8,"method":"nope"}`,
+		`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"check_host","arguments":{"host":"web1"}}}`,
 	}, "\n")
 	var out bytes.Buffer
 	s := &mcpServer{env: daemon.Env{Agent: "mcp"}, out: &out, dial: func() (rpcCaller, error) { return fd, nil }}
@@ -66,8 +70,8 @@ func TestMCP(t *testing.T) {
 		}
 		res[int(m["id"].(float64))] = m
 	}
-	if len(res) != 8 {
-		t.Fatalf("want 8 responses (notification gets none), got %d:\n%s", len(res), out.String())
+	if len(res) != 9 {
+		t.Fatalf("want 9 responses (notification gets none), got %d:\n%s", len(res), out.String())
 	}
 	text := func(id int) (string, bool) {
 		r := res[id]["result"].(map[string]any)
@@ -76,7 +80,7 @@ func TestMCP(t *testing.T) {
 	if v := res[1]["result"].(map[string]any)["protocolVersion"]; v != "2025-06-18" {
 		t.Errorf("protocol version %v", v)
 	}
-	if n := len(res[2]["result"].(map[string]any)["tools"].([]any)); n != 12 {
+	if n := len(res[2]["result"].(map[string]any)["tools"].([]any)); n != 13 {
 		t.Errorf("tools: %d", n)
 	}
 	if s, e := text(3); e || !strings.Contains(s, "web1\tstandard\tprod") {
@@ -100,5 +104,8 @@ func TestMCP(t *testing.T) {
 	}
 	if res[8]["error"].(map[string]any)["code"].(float64) != -32601 {
 		t.Errorf("unknown method: %v", res[8])
+	}
+	if s, e := text(9); !e || !strings.Contains(s, "tcp ok 3ms") || !strings.Contains(s, "hostkey FAIL") {
+		t.Errorf("check_host: %q %v", s, e)
 	}
 }

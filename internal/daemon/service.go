@@ -122,11 +122,12 @@ func (s *Service) Exec(a *ExecArgs, r *ExecReply) error {
 		r.Code, r.Msg = CodeBlocked, err.Error()
 		return nil
 	}
-	profile, ok := cfg.Visible(repo)[a.Host]
-	if !ok {
-		r.Code, r.Msg = CodeBlocked, fmt.Sprintf("host %q is not available to agents here; see 'ostiary hosts'", a.Host)
+	canon, profile, msg := cfg.Pick(repo, a.Host)
+	if msg != "" {
+		r.Code, r.Msg = CodeBlocked, msg
 		return nil
 	}
+	a.Host = canon // audit and approvals use the configured name
 	h := cfg.Hosts[a.Host]
 	cmd, display := policyCommand(a)
 	res := eng.Classify(cmd, h.Allow, h.Deny)
@@ -450,22 +451,25 @@ func Tail(path string, n int) string {
 func (s *Service) Explain(a *ExplainArgs, r *ExplainReply) error {
 	cfg, eng, _, _ := s.d.snapshot()
 	var allow, deny []string
+	var msg string
 	if a.Host != "" {
 		r.Host = a.Host
 		repo, err := hosts.FindRepo(a.Cwd)
 		if err != nil {
 			return err
 		}
-		r.Profile, r.HostOK = cfg.Visible(repo)[a.Host]
-		if r.HostOK {
-			allow, deny = cfg.Hosts[a.Host].Allow, cfg.Hosts[a.Host].Deny
+		var canon, profile string
+		canon, profile, msg = cfg.Pick(repo, a.Host)
+		if r.HostOK = msg == ""; r.HostOK {
+			r.Host, r.Profile = canon, profile
+			allow, deny = cfg.Hosts[canon].Allow, cfg.Hosts[canon].Deny
 		}
 	}
 	r.Result = eng.Classify(a.Cmd, allow, deny)
 	if r.HostOK {
 		r.Action = policy.Decide(r.Level, r.Profile).String()
 	} else if a.Host != "" {
-		r.Action, r.Msg = policy.Block.String(), fmt.Sprintf("host %q is not available to agents here", a.Host)
+		r.Action, r.Msg = policy.Block.String(), msg
 	}
 	return nil
 }
@@ -594,7 +598,14 @@ func (s *Service) Shutdown(a *ShutdownArgs, _ *Empty) error {
 
 func (s *Service) HostList(_ *Empty, r *HostListReply) error {
 	cfg, _, _, _ := s.d.snapshot()
-	r.Hosts, r.Trusted = map[string]hosts.Host{}, map[string]bool{}
+	r.Hosts, r.Trusted, r.Checks = map[string]hosts.Host{}, map[string]bool{}, map[string]CheckInfo{}
+	s.d.mu.Lock()
+	for n, c := range s.d.checks {
+		if cfg.Hosts[n] != nil {
+			r.Checks[n] = c
+		}
+	}
+	s.d.mu.Unlock()
 	for name, h := range cfg.Hosts {
 		r.Hosts[name] = *h
 		r.Trusted[name] = sshconn.Known(paths.KnownHosts(), h.Addr())

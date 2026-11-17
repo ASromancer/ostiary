@@ -49,6 +49,7 @@ type Daemon struct {
 	userOnly bool // config on disk differs from the approved hash
 	jobs     map[int]*sshconn.Job
 	tunnels  map[int]*tunnelEntry
+	checks   map[string]CheckInfo // last connection check per host, in memory (guarded by mu)
 
 	q      *approval.Queue
 	human  humanok.Confirmer
@@ -93,6 +94,7 @@ func New(notify func(approval.Notice) error, approvalTimeout time.Duration) (*Da
 	d := &Daemon{
 		jobs:    map[int]*sshconn.Job{},
 		tunnels: map[int]*tunnelEntry{},
+		checks:  map[string]CheckInfo{},
 		forceCh: make(chan struct{}), drained: make(chan struct{}),
 		q:    approval.NewQueue(notify, approvalTimeout),
 		pool: sshconn.NewPool(paths.KnownHosts()),

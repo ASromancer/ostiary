@@ -33,7 +33,8 @@ returns an approval id: call run again with the same host, command and approval_
 If a result says the request was denied or blocked, stop and ask the user; never retry another way.
 If it says ostiary is restarting (code 103), wait about 10 seconds and retry the same call once.
 No PTY: use 'top -bn1', 'cat', 'tail -n' instead of interactive programs. Prefer the output tool with
-grep over re-running heavy commands.`
+grep over re-running heavy commands.
+If a command hangs or cannot connect, call check_host: it shows whether tcp, host key, auth or exec fails.`
 
 type rpcCaller interface {
 	Call(method string, args, reply any) error
@@ -188,6 +189,9 @@ var mcpTools = []any{
 		}, "id"), true, false),
 	tool("explain", "Classify a command", "How ostiary classifies a command and what it would do on a host. Runs nothing.",
 		obj(map[string]any{"command": str("shell command"), "host": str("optional host to apply its profile and rules")}, "command"), true, false),
+	tool("check_host", "Check a host connection", "Test the connection to a host: tcp, host key, auth, and running 'true'. Read-only, needs no approval. "+
+		"Use it when a command hangs or fails to connect; it says which stage fails.",
+		obj(map[string]any{"host": str("host name from the hosts tool")}, "host"), true, false),
 	tool("get", "Download a file", "Copy a remote file (max 50 MB) to a local absolute path.",
 		obj(map[string]any{"host": str("host"), "remote_path": str("remote file"), "local_path": str("local absolute path"),
 			"approval_id": num("id from a previous 'approval required' result")}, "host", "remote_path", "local_path"), false, false),
@@ -251,6 +255,15 @@ func (s *mcpServer) call(name string, a map[string]any) (string, bool) {
 			return err.Error(), true
 		}
 		return hostsText(r.Hosts), false
+	case "check_host":
+		var r daemon.CheckReply
+		if err := call("A.Check", &daemon.CheckArgs{Env: s.env, Host: argStr(a, "host")}, &r); err != nil {
+			return err.Error(), true
+		}
+		if r.Code != 0 {
+			return failText(r.Code, r.Msg), true
+		}
+		return checkText(argStr(a, "host"), r), !r.OK
 	case "job_tail", "job_kill":
 		var r daemon.JobReply
 		id := argInt(a, "id")

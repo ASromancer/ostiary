@@ -332,6 +332,18 @@ def main():
         rc, out, err = run("run", "e2e", "sh -c 'exit 7'")
         check(rc == 7 and not err, "remote exit code passes through", out + err)
 
+        rc, out, err = run("check", "E2E")  # host names match case-insensitively
+        check(rc == 0 and re.match(r"tcp ok \d+ms\nhostkey ok \d+ms\nauth ok \d+ms\nexec ok \d+ms\n$", out), "check passes all four stages", out + err)
+        _s = socket.socket()
+        _s.bind(("127.0.0.1", 0))
+        dead_port = _s.getsockname()[1]
+        _s.close()
+        rc, out = admin("host", "add", "deadport", "--host", "127.0.0.1", "--port", str(dead_port), "--user", user,
+                        "--key", "e2e", "--agent")
+        check(rc == 0, "host add for a closed port", out)
+        rc, out, err = run("check", "deadport")
+        check(rc == 1 and out.startswith("tcp FAIL ") and "hostkey" not in out, "check on a closed port fails at tcp", out + err)
+
         codex_env = {k: v for k, v in ENV.items() if k != "CLAUDECODE"}
         codex_env["CODEX_SANDBOX"] = "seatbelt"
         p = subprocess.Popen([BIN, "run", "e2e", "touch /tmp/x-ostiary-e2e"], env=codex_env, stdin=subprocess.DEVNULL,
@@ -507,10 +519,12 @@ def main():
             return r["content"][0]["text"], r["isError"]
         init = rpc(1, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "e2e", "version": "0"}})
         mcp.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
-        check(init["result"]["serverInfo"]["name"] == "ostiary" and len(rpc(2, "tools/list")["result"]["tools"]) == 12,
+        check(init["result"]["serverInfo"]["name"] == "ostiary" and len(rpc(2, "tools/list")["result"]["tools"]) == 13,
               "mcp initialize + tools/list")
         text, err = tool(3, "run", host="e2e", command="echo via-mcp")
         check(not err and "level=read" in text and "via-mcp" in text, "mcp run read", text)
+        text, err = tool(30, "check_host", host="E2E")
+        check(not err and "exec ok" in text, "mcp check_host", text)
         text, err = tool(4, "run", host="e2e", command="cat /etc/shadow")
         check(err and "code 100" in text, "mcp blocks forbidden", text)
         victim3 = os.path.join(remote, "victim3")

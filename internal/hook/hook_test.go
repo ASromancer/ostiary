@@ -60,6 +60,7 @@ func TestBash(t *testing.T) {
 		{`ostiary tunnel list`, "allow"},
 		{`ostiary tunnel close 7`, "allow"},
 		{`ostiary hosts`, "allow"},
+		{`ostiary check web1`, "allow"},
 		{`ostiary out 12 --grep error`, "allow"},
 		{`ostiary approve`, "deny"},
 		{`ostiary key export web1`, "deny"},

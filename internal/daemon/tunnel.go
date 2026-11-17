@@ -183,11 +183,13 @@ func (s *Service) TunnelOpen(a *TunnelArgs, r *TunnelReply) error {
 		r.Code, r.Msg = CodeBlocked, err.Error()
 		return nil
 	}
-	if _, ok := cfg.Visible(repo)[a.Host]; !ok {
-		r.Code, r.Msg = CodeBlocked, fmt.Sprintf("host %q is not available to agents here; see 'ostiary hosts'", a.Host)
+	canon, prof, msg := cfg.Pick(repo, a.Host)
+	if msg != "" {
+		r.Code, r.Msg = CodeBlocked, msg
 		return nil
 	}
-	if prof := cfg.Visible(repo)[a.Host]; prof == policy.ProfileReadonly {
+	a.Host = canon
+	if prof == policy.ProfileReadonly {
 		r.Code, r.Msg = CodeBlocked, fmt.Sprintf("host %q is read-only here; a tunnel could carry writes, so it is refused", a.Host)
 		return nil
 	}

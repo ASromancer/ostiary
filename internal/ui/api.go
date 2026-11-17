@@ -83,6 +83,14 @@ func (s *Server) routes(mux *http.ServeMux) {
 		}
 		writeJSON(w, h)
 	})
+	mux.HandleFunc("POST /api/hosts/{name}/check", func(w http.ResponseWriter, r *http.Request) {
+		c, err := b.HostCheck(r.PathValue("name"))
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, c)
+	})
 	mux.HandleFunc("POST /api/admin/begin", func(w http.ResponseWriter, r *http.Request) {
 		var in struct{ Op, Name, Pass, Hash string }
 		if !readJSON(w, r, &in) {
